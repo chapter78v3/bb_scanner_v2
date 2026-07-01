@@ -8,6 +8,7 @@ from .passive import PassiveHeadersDetector
 from .secrets_js import JavaScriptSecretsDetector
 from .sqli import SQLiDetector
 from .ssrf import SSRFDetector
+from .takeover import SubdomainTakeoverDetector
 from .xss import XSSDetector
 
 DEFAULT_DETECTORS = [
@@ -20,4 +21,5 @@ DEFAULT_DETECTORS = [
     JavaScriptSecretsDetector,
     PassiveHeadersDetector,
     DomXssDetector,
+    SubdomainTakeoverDetector,
 ]
