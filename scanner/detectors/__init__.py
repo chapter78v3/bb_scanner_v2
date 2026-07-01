@@ -1,9 +1,11 @@
 """Detector package and default plugin registration."""
 
+from .cors import CORSMisconfigurationDetector
 from .csrf import CSRFFDetector
 from .dom_xss import DomXssDetector
 from .idor import IDORDetector
 from .lfi import LFIDetector
+from .open_redirect import OpenRedirectDetector
 from .passive import PassiveHeadersDetector
 from .secrets_js import JavaScriptSecretsDetector
 from .sqli import SQLiDetector
@@ -22,4 +24,6 @@ DEFAULT_DETECTORS = [
     PassiveHeadersDetector,
     DomXssDetector,
     SubdomainTakeoverDetector,
+    CORSMisconfigurationDetector,
+    OpenRedirectDetector,
 ]

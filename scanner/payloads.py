@@ -85,6 +85,40 @@ SSRF_PARAM_HINTS = {
     "domain",
 }
 
+# Parameter names commonly used to carry a post-action redirect target.
+REDIRECT_PARAM_HINTS = {
+    "url",
+    "uri",
+    "redirect",
+    "redirect_uri",
+    "redirect_url",
+    "redirecturl",
+    "return",
+    "return_url",
+    "returnurl",
+    "returnto",
+    "return_to",
+    "next",
+    "dest",
+    "destination",
+    "continue",
+    "goto",
+    "go",
+    "target",
+    "to",
+    "out",
+    "link",
+    "forward",
+    "callback",
+    "checkout_url",
+    "rurl",
+    "u",
+}
+
+# Canary host used to prove an off-site redirect. Never actually visited by a
+# victim — presence in a Location header / meta refresh is the vulnerability.
+OPEN_REDIRECT_CANARY = "evil-redirect-probe.example"
+
 LFI_PARAM_HINTS = {
     "file",
     "path",
