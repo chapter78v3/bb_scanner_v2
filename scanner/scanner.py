@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import os
 import time
 from typing import Dict, List
 
 from .content_discovery import ContentDiscovery
 from .crawler import WebCrawler
 from .detectors import DEFAULT_DETECTORS
+from .knowledge_base import KnowledgeBase
 from .models import Finding, ScanContext
 from .nuclei import NucleiRunner
 from .oast import build_oast_client
@@ -61,6 +63,7 @@ class Scanner:
         nuclei_concurrency: int = 25,
         nuclei_timeout: int = 5,
         nuclei_overall_timeout: int | None = None,
+        knowledge_base_path: str | None = None,
     ) -> None:
         self.target_url = target_url
         self.allow_external = allow_external
@@ -139,6 +142,25 @@ class Scanner:
                 headers=headers,
                 cookies=cookies,
             )
+
+        # Institutional memory: prior bug-bounty findings for this target's host.
+        # Loaded from an operator-supplied knowledge base so the scanner re-tests
+        # known hotspots first and can flag reachable endpoints as regressions.
+        self.knowledge_base = None
+        self.kb_seed_urls: List[str] = []
+        if knowledge_base_path and os.path.isfile(knowledge_base_path):
+            try:
+                self.knowledge_base = KnowledgeBase.load(knowledge_base_path)
+            except (OSError, ValueError):
+                self.knowledge_base = None
+        if self.knowledge_base is not None:
+            self.kb_seed_urls = self.knowledge_base.seed_urls_for(self.target_url)
+            for url in self.kb_seed_urls:
+                if url not in self.seed_urls:
+                    self.seed_urls.append(url)
+            for param in self.knowledge_base.param_hints_for(self.target_url):
+                if param not in self.sqli_custom_params:
+                    self.sqli_custom_params.append(param)
 
     def run(self) -> List[Finding]:
         preflight = self._preflight()
@@ -240,6 +262,20 @@ class Scanner:
             nuclei_findings, nuclei_stats = self.nuclei_runner.scan(nuclei_targets)
             findings.extend(nuclei_findings)
 
+        # Regression watch: flag historically-vulnerable endpoints that are still
+        # reachable so the operator confirms the original fix has not regressed.
+        kb_stats: Dict[str, object] = {"enabled": self.knowledge_base is not None}
+        if self.knowledge_base is not None:
+            reachable = set(crawl_result.urls)
+            regression_findings = self.knowledge_base.regression_findings(self.target_url, reachable)
+            findings.extend(regression_findings)
+            kb_stats = {
+                "enabled": True,
+                "host_findings": len(self.knowledge_base.for_target(self.target_url)),
+                "seed_urls_added": len(self.kb_seed_urls),
+                "regressions_flagged": len(regression_findings),
+            }
+
         self.last_run_stats = {
             "discovery": {
                 "urls": len(crawl_result.urls),
@@ -262,6 +298,7 @@ class Scanner:
             "sqli_probes": context.metadata.get("sqli_probe_artifacts", []),
             "oast_interactions": oast_interactions,
             "nuclei": nuclei_stats,
+            "knowledge_base": kb_stats,
             "preflight": preflight,
             "configuration": {
                 "seed_urls": self.seed_urls,

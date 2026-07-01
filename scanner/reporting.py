@@ -82,6 +82,14 @@ class ReportingEngine:
                     )
                 else:
                     print(f"Nuclei: enabled but skipped ({nuclei.get('skipped_reason', 'unavailable')})")
+            kb = stats.get("knowledge_base", {})
+            if kb.get("enabled"):
+                print(
+                    "Knowledge base: "
+                    f"host_findings={kb.get('host_findings', 0)}, "
+                    f"hotspots_seeded={kb.get('seed_urls_added', 0)}, "
+                    f"regressions_flagged={kb.get('regressions_flagged', 0)}"
+                )
             for detector in stats.get("detectors", []):
                 error = detector.get("error")
                 status = "error" if error else "ok"

@@ -224,6 +224,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional hard cap in seconds for the entire nuclei run.",
     )
+    parser.add_argument(
+        "--knowledge-base",
+        default="knowledge_base.json",
+        help="Path to the historical bug-bounty knowledge base JSON. Used when present to "
+             "re-test known hotspots for the target host and flag regressions. "
+             "Build it with 'python -m scanner.ingest_reports'.",
+    )
+    parser.add_argument(
+        "--no-knowledge-base",
+        action="store_true",
+        help="Disable loading the historical knowledge base even if the file exists.",
+    )
     return parser
 
 
@@ -282,6 +294,7 @@ def main() -> int:
         nuclei_concurrency=args.nuclei_concurrency,
         nuclei_timeout=args.nuclei_timeout,
         nuclei_overall_timeout=args.nuclei_overall_timeout,
+        knowledge_base_path=None if args.no_knowledge_base else args.knowledge_base,
     )
 
     findings = scanner.run()

@@ -6,6 +6,13 @@ report*.sarif
 sample_report.json
 *.sarif
 
+# --- Historical bug bounty reports (SENSITIVE - keep local only) ---
+bb_reports/
+*.docx
+*.doc
+knowledge_base.json
+knowledge_base*.json
+
 # --- Python ---
 __pycache__/
 *.py[cod]
