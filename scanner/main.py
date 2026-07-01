@@ -242,6 +242,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Apply host-agnostic patterns (paths and parameters) learned from ALL historical "
              "findings to the current target, even if its host is not in the knowledge base.",
     )
+    parser.add_argument(
+        "--kb-learn",
+        action="store_true",
+        help="Self-learning loop: fold this scan's confirmed (non-informational, "
+             "medium/high-confidence) findings back into the knowledge base so future scans "
+             "start smarter. Creates the knowledge base file if it does not exist yet.",
+    )
     return parser
 
 
@@ -302,6 +309,7 @@ def main() -> int:
         nuclei_overall_timeout=args.nuclei_overall_timeout,
         knowledge_base_path=None if args.no_knowledge_base else args.knowledge_base,
         kb_generalize=args.kb_generalize,
+        kb_learn=args.kb_learn,
     )
 
     findings = scanner.run()

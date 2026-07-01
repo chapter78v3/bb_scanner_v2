@@ -92,6 +92,11 @@ class ReportingEngine:
                 )
                 if kb.get("generalize"):
                     print(f"  Generalization: probing {kb.get('learned_paths_probed', 0)} learned path pattern(s) on this host")
+                if kb.get("learn"):
+                    line = f"  Self-learning: recorded {kb.get('learned_new', 0)} new confirmed finding(s) into the knowledge base"
+                    if kb.get("learn_error"):
+                        line += f" (save failed: {kb.get('learn_error')})"
+                    print(line)
             for detector in stats.get("detectors", []):
                 error = detector.get("error")
                 status = "error" if error else "ok"

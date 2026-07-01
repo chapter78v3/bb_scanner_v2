@@ -13,16 +13,24 @@ live in the repository.
 from __future__ import annotations
 
 import glob
+import hashlib
 import json
 import os
 import re
 from dataclasses import asdict, dataclass, field
-from typing import Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Set
 from urllib.parse import parse_qs, urlsplit
 
 from bs4 import BeautifulSoup
 
 from .models import Finding
+
+# Findings the self-learning loop must never fold back into the knowledge base:
+# derived/meta records that would create feedback loops or add no signal.
+_NON_LEARNABLE_DETECTORS = {"knowledge_base"}
+_NON_LEARNABLE_SEVERITIES = {"info"}
+_NON_LEARNABLE_VULN_PREFIXES = ("Regression Watch", "Scanner Detector Error", "Blind ")
 
 # Field labels used by the JIRA HTML export (label cell -> value cell).
 _TITLE_ID_RE = re.compile(r"\[#?([A-Z]+-\d+)\]")
@@ -322,6 +330,84 @@ class KnowledgeBase:
                 )
             )
         return findings
+
+    # -- self-learning loop --------------------------------------------------
+    @staticmethod
+    def _is_learnable(finding: Finding) -> bool:
+        """A finding is worth remembering only if it is a concrete, confirmed
+        weakness — not an informational note, meta record, or scanner error."""
+        if finding.detector in _NON_LEARNABLE_DETECTORS:
+            return False
+        if (finding.severity or "").lower() in _NON_LEARNABLE_SEVERITIES:
+            return False
+        if (finding.confidence or "").lower() == "low":
+            return False
+        vuln = finding.vulnerability or ""
+        if any(vuln.startswith(prefix) for prefix in _NON_LEARNABLE_VULN_PREFIXES):
+            return False
+        return bool(urlsplit(finding.url).hostname)
+
+    @staticmethod
+    def _finding_key(host: str, path: str, vulnerability: str, parameter: str) -> str:
+        raw = "|".join((host.lower(), path.lower(), vulnerability.lower(), (parameter or "").lower()))
+        return hashlib.sha1(raw.encode("utf-8", "replace")).hexdigest()[:12]
+
+    def _existing_keys(self) -> Set[str]:
+        keys: Set[str] = set()
+        for hist in self.findings:
+            param = hist.parameters[0] if hist.parameters else ""
+            keys.add(self._finding_key(hist.host, hist.path, hist.vulnerability, param))
+        return keys
+
+    def _to_historical(self, finding: Finding, source: str) -> HistoricalFinding:
+        split = urlsplit(finding.url)
+        host = split.hostname or ""
+        path = split.path or ""
+        params = sorted(parse_qs(split.query).keys()) if split.query else []
+        if finding.parameter and finding.parameter not in params:
+            params.append(finding.parameter)
+        key = self._finding_key(host, path, finding.vulnerability, finding.parameter or "")
+        return HistoricalFinding(
+            ticket_id=f"SCAN-{key}",
+            summary=(finding.description or finding.vulnerability)[:300],
+            weakness_raw=finding.vulnerability[:200],
+            vulnerability=finding.vulnerability,
+            cwe=finding.cwe,
+            owasp=finding.owasp,
+            detector=finding.detector,
+            url=finding.url,
+            host=host,
+            path=path,
+            parameters=params,
+            status="Confirmed by scanner",
+            labels=["auto-learned", (finding.severity or "").lower(), (finding.confidence or "").lower()],
+            reporter="bb_scanner",
+            source_file=source,
+        )
+
+    def learn_from_findings(self, findings: List[Finding], source: Optional[str] = None) -> List[HistoricalFinding]:
+        """Fold this scan's confirmed findings back into the knowledge base.
+
+        Only concrete, non-informational, medium/high-confidence findings are
+        remembered. Records are deduplicated by (host, path, vulnerability,
+        parameter) so re-running a scan never inflates the store. Returns the
+        list of *newly* added historical findings.
+        """
+        source = source or f"scan:{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}"
+        existing = self._existing_keys()
+        added: List[HistoricalFinding] = []
+        for finding in findings:
+            if not self._is_learnable(finding):
+                continue
+            split = urlsplit(finding.url)
+            key = self._finding_key(split.hostname or "", split.path or "", finding.vulnerability, finding.parameter or "")
+            if key in existing:
+                continue
+            existing.add(key)
+            record = self._to_historical(finding, source)
+            self.findings.append(record)
+            added.append(record)
+        return added
 
     def stats(self) -> Dict[str, object]:
         by_class: Dict[str, int] = {}

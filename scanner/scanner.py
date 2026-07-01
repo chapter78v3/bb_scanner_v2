@@ -65,6 +65,7 @@ class Scanner:
         nuclei_overall_timeout: int | None = None,
         knowledge_base_path: str | None = None,
         kb_generalize: bool = False,
+        kb_learn: bool = False,
     ) -> None:
         self.target_url = target_url
         self.allow_external = allow_external
@@ -125,6 +126,8 @@ class Scanner:
         # Loaded before content discovery so learned paths can be probed too.
         self.knowledge_base = None
         self.kb_generalize = kb_generalize
+        self.kb_learn = kb_learn
+        self.knowledge_base_path = knowledge_base_path
         self.kb_seed_urls: List[str] = []
         self.kb_learned_paths: List[str] = []
         if knowledge_base_path and os.path.isfile(knowledge_base_path):
@@ -132,6 +135,10 @@ class Scanner:
                 self.knowledge_base = KnowledgeBase.load(knowledge_base_path)
             except (OSError, ValueError):
                 self.knowledge_base = None
+        # With --kb-learn the scanner may bootstrap a brand-new store so a first
+        # scan of a fresh target still records what it confirms.
+        if self.knowledge_base is None and self.kb_learn and knowledge_base_path:
+            self.knowledge_base = KnowledgeBase()
         if self.knowledge_base is not None:
             self.kb_seed_urls = self.knowledge_base.seed_urls_for(self.target_url)
             for url in self.kb_seed_urls:
@@ -290,6 +297,20 @@ class Scanner:
                 "generalize": self.kb_generalize,
                 "learned_paths_probed": len(self.kb_learned_paths),
             }
+
+            # Self-learning loop: fold this scan's confirmed findings back into
+            # the store so every future scan starts smarter. Opt-in; skips info
+            # notes, low-confidence noise, and meta records; dedupes by hotspot.
+            kb_stats["learn"] = self.kb_learn
+            kb_stats["learned_new"] = 0
+            if self.kb_learn and self.knowledge_base_path:
+                learned = self.knowledge_base.learn_from_findings(findings)
+                kb_stats["learned_new"] = len(learned)
+                if learned:
+                    try:
+                        self.knowledge_base.save(self.knowledge_base_path)
+                    except OSError as exc:
+                        kb_stats["learn_error"] = str(exc)
 
         self.last_run_stats = {
             "discovery": {
