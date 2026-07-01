@@ -90,6 +90,8 @@ class ReportingEngine:
                     f"hotspots_seeded={kb.get('seed_urls_added', 0)}, "
                     f"regressions_flagged={kb.get('regressions_flagged', 0)}"
                 )
+                if kb.get("generalize"):
+                    print(f"  Generalization: probing {kb.get('learned_paths_probed', 0)} learned path pattern(s) on this host")
             for detector in stats.get("detectors", []):
                 error = detector.get("error")
                 status = "error" if error else "ok"

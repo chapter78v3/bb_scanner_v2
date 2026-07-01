@@ -236,6 +236,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable loading the historical knowledge base even if the file exists.",
     )
+    parser.add_argument(
+        "--kb-generalize",
+        action="store_true",
+        help="Apply host-agnostic patterns (paths and parameters) learned from ALL historical "
+             "findings to the current target, even if its host is not in the knowledge base.",
+    )
     return parser
 
 
@@ -295,6 +301,7 @@ def main() -> int:
         nuclei_timeout=args.nuclei_timeout,
         nuclei_overall_timeout=args.nuclei_overall_timeout,
         knowledge_base_path=None if args.no_knowledge_base else args.knowledge_base,
+        kb_generalize=args.kb_generalize,
     )
 
     findings = scanner.run()

@@ -188,18 +188,22 @@ class ContentDiscovery:
         extensions: Optional[List[str]] = None,
         max_paths: int = 0,
         concurrency: int = 1,
+        extra_words: Optional[List[str]] = None,
     ) -> None:
         self.engine = engine
         self.wordlist_path = Path(wordlist_path) if wordlist_path else DEFAULT_WORDLIST
         self.extensions = [e.strip().lstrip(".") for e in (extensions or []) if e.strip()]
         self.max_paths = max(0, max_paths)
         self.concurrency = max(1, concurrency)
+        # Additional paths (e.g. learned from historical findings) probed in
+        # addition to the wordlist file. Deduplicated against loaded words.
+        self.extra_words = [w.strip().lstrip("/") for w in (extra_words or []) if w.strip()]
 
     def load_words(self) -> List[str]:
         try:
             raw = self.wordlist_path.read_text(encoding="utf-8", errors="ignore").splitlines()
         except OSError:
-            return []
+            raw = []
         words: List[str] = []
         seen = set()
         for line in raw:
@@ -207,6 +211,11 @@ class ContentDiscovery:
             if not entry or entry.startswith("#"):
                 continue
             entry = entry.lstrip("/")
+            if entry and entry not in seen:
+                seen.add(entry)
+                words.append(entry)
+        # Append learned/extra paths that are not already covered by the wordlist.
+        for entry in self.extra_words:
             if entry and entry not in seen:
                 seen.add(entry)
                 words.append(entry)

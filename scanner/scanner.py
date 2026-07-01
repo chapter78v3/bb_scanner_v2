@@ -64,6 +64,7 @@ class Scanner:
         nuclei_timeout: int = 5,
         nuclei_overall_timeout: int | None = None,
         knowledge_base_path: str | None = None,
+        kb_generalize: bool = False,
     ) -> None:
         self.target_url = target_url
         self.allow_external = allow_external
@@ -117,6 +118,36 @@ class Scanner:
         self.registry = DetectorRegistry()
         for detector_cls in DEFAULT_DETECTORS:
             self.registry.register(detector_cls)
+
+        # Institutional memory: prior bug-bounty findings for this target's host.
+        # Loaded from an operator-supplied knowledge base so the scanner re-tests
+        # known hotspots first and can flag reachable endpoints as regressions.
+        # Loaded before content discovery so learned paths can be probed too.
+        self.knowledge_base = None
+        self.kb_generalize = kb_generalize
+        self.kb_seed_urls: List[str] = []
+        self.kb_learned_paths: List[str] = []
+        if knowledge_base_path and os.path.isfile(knowledge_base_path):
+            try:
+                self.knowledge_base = KnowledgeBase.load(knowledge_base_path)
+            except (OSError, ValueError):
+                self.knowledge_base = None
+        if self.knowledge_base is not None:
+            self.kb_seed_urls = self.knowledge_base.seed_urls_for(self.target_url)
+            for url in self.kb_seed_urls:
+                if url not in self.seed_urls:
+                    self.seed_urls.append(url)
+            for param in self.knowledge_base.param_hints_for(self.target_url):
+                if param not in self.sqli_custom_params:
+                    self.sqli_custom_params.append(param)
+            # Host-agnostic generalization: probe path/param patterns learned from
+            # ALL past findings on this target too, even if the host is new.
+            if self.kb_generalize:
+                self.kb_learned_paths = self.knowledge_base.learned_paths()
+                for param in self.knowledge_base.learned_params():
+                    if param not in self.sqli_custom_params:
+                        self.sqli_custom_params.append(param)
+
         self.content_discovery = None
         if content_discovery:
             self.content_discovery = ContentDiscovery(
@@ -125,6 +156,7 @@ class Scanner:
                 extensions=discovery_extensions,
                 max_paths=discovery_max_paths,
                 concurrency=self.concurrency,
+                extra_words=self.kb_learned_paths,
             )
         self.nuclei_runner = None
         if nuclei:
@@ -142,25 +174,6 @@ class Scanner:
                 headers=headers,
                 cookies=cookies,
             )
-
-        # Institutional memory: prior bug-bounty findings for this target's host.
-        # Loaded from an operator-supplied knowledge base so the scanner re-tests
-        # known hotspots first and can flag reachable endpoints as regressions.
-        self.knowledge_base = None
-        self.kb_seed_urls: List[str] = []
-        if knowledge_base_path and os.path.isfile(knowledge_base_path):
-            try:
-                self.knowledge_base = KnowledgeBase.load(knowledge_base_path)
-            except (OSError, ValueError):
-                self.knowledge_base = None
-        if self.knowledge_base is not None:
-            self.kb_seed_urls = self.knowledge_base.seed_urls_for(self.target_url)
-            for url in self.kb_seed_urls:
-                if url not in self.seed_urls:
-                    self.seed_urls.append(url)
-            for param in self.knowledge_base.param_hints_for(self.target_url):
-                if param not in self.sqli_custom_params:
-                    self.sqli_custom_params.append(param)
 
     def run(self) -> List[Finding]:
         preflight = self._preflight()
@@ -274,6 +287,8 @@ class Scanner:
                 "host_findings": len(self.knowledge_base.for_target(self.target_url)),
                 "seed_urls_added": len(self.kb_seed_urls),
                 "regressions_flagged": len(regression_findings),
+                "generalize": self.kb_generalize,
+                "learned_paths_probed": len(self.kb_learned_paths),
             }
 
         self.last_run_stats = {

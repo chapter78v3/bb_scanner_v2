@@ -256,6 +256,42 @@ class KnowledgeBase:
                     params.append(param)
         return params
 
+    # -- global (host-agnostic) learning -------------------------------------
+    def learned_paths(self) -> List[str]:
+        """Distinct URL paths seen across ALL historical findings, host-agnostic.
+
+        These are re-probed on any target so a weakness pattern found on one host
+        (e.g. ``/portabilidad/device/listAllDevice``) is checked everywhere.
+        """
+        paths: List[str] = []
+        for finding in self.findings:
+            path = (finding.path or "").strip()
+            if not path or path == "/":
+                continue
+            normalized = path.lstrip("/").rstrip("&?/")
+            if normalized and normalized not in paths:
+                paths.append(normalized)
+        return paths
+
+    def learned_params(self) -> List[str]:
+        """Every parameter name abused across ALL historical findings."""
+        params: List[str] = []
+        for finding in self.findings:
+            for param in finding.parameters:
+                if param and param not in params:
+                    params.append(param)
+        return params
+
+    def learned_path_segments(self, min_length: int = 3) -> List[str]:
+        """Individual path segments (tokens) across all findings, for wordlists."""
+        segments: List[str] = []
+        for finding in self.findings:
+            for segment in (finding.path or "").split("/"):
+                token = segment.strip().lower()
+                if len(token) >= min_length and "." not in token and token not in segments:
+                    segments.append(token)
+        return segments
+
     def regression_findings(self, target_url: str, reachable_urls: set) -> List[Finding]:
         """Emit an informational watch for each historical hotspot that is still
         reachable, so the operator confirms the prior fix has not regressed."""
