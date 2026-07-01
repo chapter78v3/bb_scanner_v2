@@ -4,7 +4,7 @@ import random
 import string
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 
 from .models import Finding
@@ -110,6 +110,68 @@ SENSITIVE_RULES: List[Tuple[str, str, str, str, str, str]] = [
      "A VS Code .vscode directory is reachable and may leak project settings and paths."),
 ]
 
+# Substrings that indicate a WAF/security-gateway block or challenge page rather
+# than the real resource. These frequently ride on an HTTP 200, which is exactly
+# what produces false "exposed file" findings.
+BLOCK_INDICATORS: Tuple[str, ...] = (
+    "access denied",
+    "request blocked",
+    "your request has been blocked",
+    "this request has been blocked",
+    "the request was blocked",
+    "has been blocked",
+    "attention required",
+    "web application firewall",
+    "blocked by",
+    "unusual traffic",
+    "incapsula",
+    "imperva",
+    "sucuri",
+    "mod_security",
+    "not acceptable",
+    "please enable cookies",
+    "ray id",
+    "support id:",
+    "reference #",
+    "akamai",
+    "our systems have detected",
+)
+
+# HTTP header keys that reveal a WAF/CDN in front of the app. Presence alone is
+# NOT treated as a block (many benign sites sit behind Cloudflare/Akamai); it is
+# only used together with a blocking status code.
+WAF_HEADER_KEYS: Tuple[str, ...] = (
+    "cf-ray",
+    "x-iinfo",
+    "x-sucuri-id",
+    "x-sucuri-cache",
+    "x-akamai-transformed",
+    "x-waf-event-info",
+)
+
+# Required body signatures for endpoints whose exposure can be content-verified.
+# When a rule has signatures and none appear in the response body, the hit is
+# treated as unconfirmed (no finding) to avoid block-page / soft-shell false
+# positives. Keyed by the vulnerability name emitted by SENSITIVE_RULES.
+CONTENT_SIGNATURES: Dict[str, Tuple[str, ...]] = {
+    "PHP Info Disclosure": ("phpinfo()", "php version", "<title>phpinfo"),
+    "Apache server-status Exposure": ("apache server status", "requests currently being processed", "server uptime"),
+    "Apache server-info Exposure": ("apache server information", "server settings", "server root"),
+    "Exposed Spring Boot Actuator": ('"_links"', '"status"', '"diskspace"', '"components"'),
+    "Exposed API Documentation/Schema": ("swagger", "openapi", '"paths"', "api documentation"),
+    "Exposed GraphQL Endpoint": ("graphql", '"data"', '"errors"', "must provide query", "query root type"),
+}
+
+
+class ProbeResult(NamedTuple):
+    """Response fingerprint captured for a single forced-browse request."""
+
+    status: int
+    length: int
+    final_path: str
+    body: str            # first 4000 chars, lowercased, for signature/block checks
+    waf_header: bool     # a known WAF/CDN header is present
+
 
 class ContentDiscovery:
     """Wordlist-based forced browsing to find unlinked paths.
@@ -166,18 +228,36 @@ class ContentDiscovery:
             candidates = candidates[: self.max_paths]
         return candidates
 
-    def _probe(self, url: str) -> Optional[Tuple[int, int, str]]:
-        """Return (status_code, body_length, final_path) or None on error."""
+    def _probe(self, url: str) -> Optional[ProbeResult]:
+        """Fetch a candidate path and capture its response fingerprint."""
         try:
             response = self.engine.get(url)
         except Exception:
             return None
         final_path = urlparse(response.url).path
-        return response.status_code, len(response.content or b""), final_path
+        try:
+            body = (response.text or "")[:4000].lower()
+        except Exception:
+            body = ""
+        headers_lower = {k.lower() for k in response.headers.keys()}
+        server = response.headers.get("Server", "").lower()
+        waf_header = (
+            any(key in headers_lower for key in WAF_HEADER_KEYS)
+            or "cloudflare" in server
+            or "sucuri" in server
+            or "akamai" in server
+        )
+        return ProbeResult(
+            status=response.status_code,
+            length=len(response.content or b""),
+            final_path=final_path,
+            body=body,
+            waf_header=waf_header,
+        )
 
-    def _calibrate(self, base: str) -> List[Tuple[int, int, str]]:
+    def _calibrate(self, base: str) -> List[ProbeResult]:
         """Fetch a few random paths to fingerprint the site's not-found response."""
-        signatures: List[Tuple[int, int, str]] = []
+        signatures: List[ProbeResult] = []
         for _ in range(3):
             token = "".join(random.choices(string.ascii_lowercase + string.digits, k=16))
             probe = self._probe(urljoin(base, f"zz{token}zz"))
@@ -186,25 +266,33 @@ class ContentDiscovery:
         return signatures
 
     @staticmethod
-    def _looks_like_not_found(
-        result: Tuple[int, int, str], baselines: List[Tuple[int, int, str]]
-    ) -> bool:
-        status, length, final_path = result
-        if status in NOT_FOUND_STATUSES:
+    def _looks_like_not_found(result: ProbeResult, baselines: List[ProbeResult]) -> bool:
+        if result.status in NOT_FOUND_STATUSES:
             return True
-        for b_status, b_length, b_path in baselines:
-            if status != b_status:
+        for base in baselines:
+            if result.status != base.status:
                 continue
             # Redirect-style soft-404: missing paths land on the same page
             # (e.g. /login or home) as the random calibration probes did.
-            if final_path == b_path:
+            if result.final_path == base.final_path:
                 return True
             # Content-style soft-404: a generic 200 body of near-identical size
             # is served at the requested path. Path differs per request, so we
             # fingerprint on the body length instead.
-            tolerance = max(64, int(b_length * 0.05))
-            if abs(length - b_length) <= tolerance:
+            tolerance = max(64, int(base.length * 0.05))
+            if abs(result.length - base.length) <= tolerance:
                 return True
+        return False
+
+    @staticmethod
+    def _is_block_page(result: ProbeResult) -> bool:
+        """Detect WAF/security-gateway block or challenge responses."""
+        if any(indicator in result.body for indicator in BLOCK_INDICATORS):
+            return True
+        # A WAF header combined with a typical blocking status is a strong signal;
+        # the header alone is not, since benign sites also sit behind CDNs/WAFs.
+        if result.waf_header and result.status in (401, 403, 406, 429, 503):
+            return True
         return False
 
     @staticmethod
@@ -229,9 +317,9 @@ class ContentDiscovery:
         print(f"  Wordlist: {self.wordlist_path} ({len(candidates)} paths)")
 
         baselines = self._calibrate(base)
-        if baselines and all(b[0] not in NOT_FOUND_STATUSES for b in baselines):
+        if baselines and all(b.status not in NOT_FOUND_STATUSES for b in baselines):
             print(f"  Note: target does not return 404 for missing paths "
-                  f"(soft-404 status {baselines[0][0]}); filtering by response fingerprint.")
+                  f"(soft-404 status {baselines[0].status}); filtering by response fingerprint.")
 
         urls = [urljoin(base, path) for path in candidates]
         if self.concurrency > 1:
@@ -242,33 +330,53 @@ class ContentDiscovery:
 
         discovered: List[str] = []
         findings: List[Finding] = []
+        blocked = 0
         for url, result in zip(urls, probed):
             if result is None:
                 continue
             if self._looks_like_not_found(result, baselines):
                 continue
-            status, length, _ = result
+            # A WAF/challenge page is not a real exposure; skip it entirely so it
+            # neither becomes a finding nor floods the crawl queue.
+            if self._is_block_page(result):
+                blocked += 1
+                continue
+
             discovered.append(url)
             classified = self._classify(url)
-            if classified is not None:
-                vuln, severity, cwe, owasp, desc = classified
-                findings.append(
-                    Finding(
-                        vulnerability=vuln,
-                        severity=severity,
-                        cwe=cwe,
-                        owasp=owasp,
-                        url=url,
-                        parameter=None,
-                        description=desc,
-                        evidence=f"HTTP {status}; {length} bytes returned for forced-browse request.",
-                        detector="content_discovery",
-                        confidence="medium" if status in (401, 403) else "high",
-                        references=["https://owasp.org/www-community/attacks/Forced_browsing"],
-                    )
-                )
+            if classified is None:
+                continue
 
-        print(f"  Discovered {len(discovered)} live path(s); {len(findings)} flagged as sensitive.")
+            vuln, severity, cwe, owasp, desc = classified
+            signatures = CONTENT_SIGNATURES.get(vuln)
+            if signatures and not any(sig in result.body for sig in signatures):
+                # Path responded but the body is not the expected content
+                # (e.g. a block page or generic app shell): do not report.
+                continue
+
+            findings.append(
+                Finding(
+                    vulnerability=vuln,
+                    severity=severity,
+                    cwe=cwe,
+                    owasp=owasp,
+                    url=url,
+                    parameter=None,
+                    description=desc,
+                    evidence=(
+                        f"HTTP {result.status}; {result.length} bytes returned for forced-browse request"
+                        + ("; response body matched expected content signature." if signatures else ".")
+                    ),
+                    detector="content_discovery",
+                    confidence="medium" if result.status in (401, 403) else "high",
+                    references=["https://owasp.org/www-community/attacks/Forced_browsing"],
+                )
+            )
+
+        summary = f"  Discovered {len(discovered)} live path(s); {len(findings)} flagged as sensitive."
+        if blocked:
+            summary += f" ({blocked} suppressed as WAF/block pages.)"
+        print(summary)
         for finding in findings:
             print(f"    [!] {finding.severity.upper():8} {finding.vulnerability} -> {finding.url}")
 
