@@ -1,0 +1,12 @@
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+
+# Optional: enables --render-js headless-browser crawling of SPA/JS apps.
+# Install with: pip install playwright && python -m playwright install chromium
+# playwright>=1.40.0
+
+# Optional: enables --oast-interactsh automated out-of-band correlation.
+# Install with: pip install cryptography
+# cryptography>=41.0.0
+
+

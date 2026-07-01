@@ -1,0 +1,35 @@
+# --- Scan output (may contain sensitive target data) ---
+Reports/
+report.json
+report*.json
+report*.sarif
+sample_report.json
+*.sarif
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- Playwright / browsers ---
+.cache/
+playwright-report/
+
+# --- IDE / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
