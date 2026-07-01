@@ -17,6 +17,12 @@ DEFAULT_WORDLIST = Path(__file__).resolve().parent.parent / "wordlists" / "conte
 # Statuses that mean "definitely not here" and are never treated as a hit.
 NOT_FOUND_STATUSES = {404, 410}
 
+# A sensitive path is only an *exposure* when its content is actually served.
+# Access-controlled responses (401/403/407) mean the path exists but is NOT
+# readable — that is the correct, secure posture, not a leak — so they must
+# never be reported as an exposed-file finding.
+ACCESS_DENIED_STATUSES = {401, 403, 407}
+
 # (needle, vulnerability, severity, cwe, owasp, description) — first match wins.
 # Only paths whose discovered URL contains one of these needles are reported as
 # findings; everything else is simply fed back into the crawl for the detectors.
@@ -357,6 +363,11 @@ class ContentDiscovery:
                 continue
 
             vuln, severity, cwe, owasp, desc = classified
+            # An access-controlled response (401/403/407) means the file exists
+            # but its contents are not served, so it is protected rather than
+            # exposed. Skip it to avoid false-positive "exposed file" findings.
+            if result.status in ACCESS_DENIED_STATUSES:
+                continue
             signatures = CONTENT_SIGNATURES.get(vuln)
             if signatures and not any(sig in result.body for sig in signatures):
                 # Path responded but the body is not the expected content
@@ -377,7 +388,7 @@ class ContentDiscovery:
                         + ("; response body matched expected content signature." if signatures else ".")
                     ),
                     detector="content_discovery",
-                    confidence="medium" if result.status in (401, 403) else "high",
+                    confidence="high",
                     references=["https://owasp.org/www-community/attacks/Forced_browsing"],
                 )
             )
