@@ -26,6 +26,8 @@ from .models import Finding
 
 # Field labels used by the JIRA HTML export (label cell -> value cell).
 _TITLE_ID_RE = re.compile(r"\[#?([A-Z]+-\d+)\]")
+# A plausible public hostname: dot-separated labels ending in a TLD of 2+ letters.
+_HOSTNAME_RE = re.compile(r"^(?=.{1,253}$)([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$")
 _URL_LABEL = "Site URL or APP Name, Etc.:"
 _WEAKNESS_LABEL = "Weakness:"
 _STATUS_LABEL = "Status:"
@@ -46,6 +48,9 @@ _WEAKNESS_MAP: List[tuple] = [
     ("authentication", ("Improper Authentication", "CWE-287", "A07:2021 Identification and Authentication Failures", "passive")),
     ("hard-coded cryptographic key", ("Use of Hard-coded Cryptographic Key", "CWE-321", "A02:2021 Cryptographic Failures", "secrets_js")),
     ("hard-coded", ("Use of Hard-coded Credentials", "CWE-798", "A07:2021 Identification and Authentication Failures", "secrets_js")),
+    ("api key", ("Exposed API Key / Secret", "CWE-798", "A07:2021 Identification and Authentication Failures", "secrets_js")),
+    ("secret", ("Exposed Secret", "CWE-200", "A01:2021 Broken Access Control", "secrets_js")),
+    ("credential", ("Exposed Credentials", "CWE-522", "A07:2021 Identification and Authentication Failures", "secrets_js")),
     ("cross site scripting", ("Cross-Site Scripting", "CWE-79", "A03:2021 Injection", "xss")),
     ("cross-site scripting", ("Cross-Site Scripting", "CWE-79", "A03:2021 Injection", "xss")),
     ("xss", ("Cross-Site Scripting", "CWE-79", "A03:2021 Injection", "xss")),
@@ -54,9 +59,13 @@ _WEAKNESS_MAP: List[tuple] = [
     ("server-side request forgery", ("Server-Side Request Forgery", "CWE-918", "A10:2021 Server-Side Request Forgery", "ssrf")),
     ("server side request forgery", ("Server-Side Request Forgery", "CWE-918", "A10:2021 Server-Side Request Forgery", "ssrf")),
     ("ssrf", ("Server-Side Request Forgery", "CWE-918", "A10:2021 Server-Side Request Forgery", "ssrf")),
+    ("resource injection", ("Resource Injection", "CWE-99", "A03:2021 Injection", "ssrf")),
     ("path traversal", ("Path Traversal", "CWE-22", "A01:2021 Broken Access Control", "lfi")),
     ("local file inclusion", ("Local File Inclusion", "CWE-98", "A03:2021 Injection", "lfi")),
     ("file inclusion", ("File Inclusion", "CWE-98", "A03:2021 Injection", "lfi")),
+    ("cache poisoning", ("Web Cache Poisoning", "CWE-444", "A04:2021 Insecure Design", "")),
+    ("secure design", ("Violation of Secure Design Principles", "CWE-657", "A04:2021 Insecure Design", "")),
+    ("insecure design", ("Insecure Design", "CWE-657", "A04:2021 Insecure Design", "")),
     ("information disclosure", ("Information Disclosure", "CWE-200", "A01:2021 Broken Access Control", "passive")),
     ("information exposure", ("Information Disclosure", "CWE-200", "A01:2021 Broken Access Control", "passive")),
     ("pii", ("Sensitive Information Disclosure", "CWE-359", "A01:2021 Broken Access Control", "passive")),
@@ -74,12 +83,19 @@ def _classify_weakness(weakness: str) -> tuple:
 
 
 def _normalize_url(raw: str) -> str:
-    """Turn a report's free-form URL/host field into a canonical https URL."""
-    value = (raw or "").strip().strip("`").split()[0] if raw and raw.strip() else ""
+    """Turn a report's free-form URL/host field into a canonical https URL.
+
+    Returns an empty string when the field does not contain a plausible
+    hostname (some reports leave the field blank or with placeholder text).
+    """
+    value = (raw or "").strip().strip("`").strip("'\"").split()[0] if raw and raw.strip() else ""
     if not value:
         return ""
     if "://" not in value:
         value = "https://" + value
+    host = urlsplit(value).hostname or ""
+    if not _HOSTNAME_RE.match(host):
+        return ""
     return value
 
 
