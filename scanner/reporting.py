@@ -71,6 +71,17 @@ class ReportingEngine:
                     f"paths_discovered={cd.get('paths_discovered', 0)}, "
                     f"sensitive_findings={cd.get('sensitive_findings', 0)}"
                 )
+            nuclei = stats.get("nuclei", {})
+            if nuclei.get("enabled"):
+                if nuclei.get("available"):
+                    print(
+                        "Nuclei: "
+                        f"targets={nuclei.get('targets', 0)}, "
+                        f"findings={nuclei.get('templates_matched', 0)}, "
+                        f"runtime_ms={nuclei.get('runtime_ms', 0)}"
+                    )
+                else:
+                    print(f"Nuclei: enabled but skipped ({nuclei.get('skipped_reason', 'unavailable')})")
             for detector in stats.get("detectors", []):
                 error = detector.get("error")
                 status = "error" if error else "ok"

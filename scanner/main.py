@@ -174,6 +174,56 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="Cap the number of content-discovery paths probed. 0 means use the whole wordlist.",
     )
+    parser.add_argument(
+        "--nuclei",
+        action="store_true",
+        help="Run ProjectDiscovery nuclei over discovered URLs and merge its findings (requires nuclei on PATH).",
+    )
+    parser.add_argument(
+        "--nuclei-path",
+        default="nuclei",
+        help="Path to the nuclei binary (default: 'nuclei' on PATH).",
+    )
+    parser.add_argument(
+        "--nuclei-templates",
+        action="append",
+        default=[],
+        help="Repeatable template/dir/workflow path passed to nuclei -templates.",
+    )
+    parser.add_argument(
+        "--nuclei-severity",
+        default=None,
+        help="Comma-separated severities for nuclei (e.g. critical,high,medium).",
+    )
+    parser.add_argument(
+        "--nuclei-tags",
+        default=None,
+        help="Comma-separated tags to filter nuclei templates (e.g. cve,exposure).",
+    )
+    parser.add_argument(
+        "--nuclei-rate-limit",
+        type=int,
+        default=150,
+        help="Max requests per second for nuclei.",
+    )
+    parser.add_argument(
+        "--nuclei-concurrency",
+        type=int,
+        default=25,
+        help="Number of templates executed in parallel by nuclei.",
+    )
+    parser.add_argument(
+        "--nuclei-timeout",
+        type=int,
+        default=5,
+        help="Per-request timeout in seconds for nuclei.",
+    )
+    parser.add_argument(
+        "--nuclei-overall-timeout",
+        type=int,
+        default=None,
+        help="Optional hard cap in seconds for the entire nuclei run.",
+    )
     return parser
 
 
@@ -223,6 +273,15 @@ def main() -> int:
         wordlist_path=args.wordlist,
         discovery_extensions=args.discovery_extension,
         discovery_max_paths=args.discovery_max_paths,
+        nuclei=args.nuclei,
+        nuclei_path=args.nuclei_path,
+        nuclei_templates=args.nuclei_templates,
+        nuclei_severity=args.nuclei_severity,
+        nuclei_tags=args.nuclei_tags,
+        nuclei_rate_limit=args.nuclei_rate_limit,
+        nuclei_concurrency=args.nuclei_concurrency,
+        nuclei_timeout=args.nuclei_timeout,
+        nuclei_overall_timeout=args.nuclei_overall_timeout,
     )
 
     findings = scanner.run()

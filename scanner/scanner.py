@@ -7,6 +7,7 @@ from .content_discovery import ContentDiscovery
 from .crawler import WebCrawler
 from .detectors import DEFAULT_DETECTORS
 from .models import Finding, ScanContext
+from .nuclei import NucleiRunner
 from .oast import build_oast_client
 from .registry import DetectorRegistry
 from .renderer import JSRenderer
@@ -51,6 +52,15 @@ class Scanner:
         wordlist_path: str | None = None,
         discovery_extensions: List[str] | None = None,
         discovery_max_paths: int = 0,
+        nuclei: bool = False,
+        nuclei_path: str = "nuclei",
+        nuclei_templates: List[str] | None = None,
+        nuclei_severity: str | None = None,
+        nuclei_tags: str | None = None,
+        nuclei_rate_limit: int = 150,
+        nuclei_concurrency: int = 25,
+        nuclei_timeout: int = 5,
+        nuclei_overall_timeout: int | None = None,
     ) -> None:
         self.target_url = target_url
         self.allow_external = allow_external
@@ -112,6 +122,22 @@ class Scanner:
                 extensions=discovery_extensions,
                 max_paths=discovery_max_paths,
                 concurrency=self.concurrency,
+            )
+        self.nuclei_runner = None
+        if nuclei:
+            self.nuclei_runner = NucleiRunner(
+                nuclei_path=nuclei_path,
+                templates=nuclei_templates,
+                severity=nuclei_severity,
+                tags=nuclei_tags,
+                rate_limit=nuclei_rate_limit,
+                concurrency=nuclei_concurrency,
+                request_timeout=nuclei_timeout,
+                overall_timeout=nuclei_overall_timeout,
+                proxy=proxy,
+                verify_tls=verify_tls,
+                headers=headers,
+                cookies=cookies,
             )
 
     def run(self) -> List[Finding]:
@@ -206,6 +232,14 @@ class Scanner:
         # any blind findings (e.g. blind SSRF) that produced a real callback.
         oast_interactions = self._correlate_oast(findings)
 
+        # Template-driven scanning (CVEs, misconfigurations, exposed panels)
+        # over everything discovered, merged into the same findings pipeline.
+        nuclei_stats: Dict[str, object] = {"enabled": self.nuclei_runner is not None}
+        if self.nuclei_runner is not None:
+            nuclei_targets = list(dict.fromkeys(crawl_result.urls))
+            nuclei_findings, nuclei_stats = self.nuclei_runner.scan(nuclei_targets)
+            findings.extend(nuclei_findings)
+
         self.last_run_stats = {
             "discovery": {
                 "urls": len(crawl_result.urls),
@@ -227,6 +261,7 @@ class Scanner:
             },
             "sqli_probes": context.metadata.get("sqli_probe_artifacts", []),
             "oast_interactions": oast_interactions,
+            "nuclei": nuclei_stats,
             "preflight": preflight,
             "configuration": {
                 "seed_urls": self.seed_urls,
