@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import re
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set
@@ -42,6 +43,21 @@ _STATUS_LABEL = "Status:"
 _LABELS_LABEL = "Labels:"
 _REPORTER_NAME_LABEL = "Name:"
 
+# Prose (HackerOne-style) reports have no JIRA field table; these patterns pull
+# the affected hosts/endpoints and reporter-stated severity out of the narrative.
+_URL_RE = re.compile(r"https?://[^\s\"'<>)\]}]+", re.IGNORECASE)
+_HOST_HDR_RE = re.compile(r"(?im)^\s*Host:\s*([a-z0-9][a-z0-9.\-]+)")
+_REQ_LINE_RE = re.compile(r"(?im)^\s*(?:GET|POST|PUT|DELETE|PATCH|OPTIONS)\s+(/[^\s]*)\s+HTTP")
+_SEVERITY_RE = re.compile(r"\b(critical|high|medium|low|informational)\b", re.IGNORECASE)
+# Narrative templates sometimes label sections on their own line; these are the
+# section headers we treat as the finding description and the affected URL.
+_PROSE_DESC_LABELS = (
+    "description of security issue", "summary", "description", "impact", "details",
+)
+_PROSE_URL_LABELS = (
+    "vulnerable website url or application", "affected url", "affected urls",
+    "site url", "url", "endpoint", "target",
+)
 # Map a reported weakness to a canonical vulnerability class, CWE, OWASP category,
 # and the scanner detector best suited to re-test it. Matching is done by testing
 # whether any key (lowercased) is a substring of the reported weakness text, so
@@ -147,19 +163,238 @@ def _extract_fields(soup: BeautifulSoup) -> Dict[str, str]:
     return fields
 
 
-def parse_report(path: str) -> Optional[HistoricalFinding]:
-    """Parse a single exported report file into a :class:`HistoricalFinding`."""
+# Magic-byte signatures for the two binary Microsoft Word containers. Reports are
+# sometimes saved as real Word documents (legacy OLE2 .doc or OOXML .docx) rather
+# than the HTML/JIRA export the other files use; those are converted to HTML via
+# an installed Word before parsing so the same table extractor can be reused.
+_OLE2_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+_ZIP_MAGIC = b"PK\x03\x04"
+
+
+def _looks_like_html(head: bytes) -> bool:
+    snippet = head[:1024].lstrip().lower()
+    return snippet.startswith(b"<") or b"<!doctype" in snippet or b"<html" in snippet or b"<table" in snippet
+
+
+def _convert_word_to_html(path: str) -> Optional[str]:
+    """Convert a binary Word document (.doc/.docx) to HTML using an installed
+    Microsoft Word via COM automation. Windows-only; returns ``None`` when Word
+    or ``pywin32`` is unavailable (e.g. on Linux), so callers can fall back."""
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as handle:
-            soup = BeautifulSoup(handle.read(), "html.parser")
+        import pythoncom  # type: ignore
+        import win32com.client as win32  # type: ignore
+    except ImportError:
+        return None
+
+    import tempfile
+
+    wd_format_filtered_html = 10
+    word = None
+    tmp_path = ""
+    pythoncom.CoInitialize()
+    try:
+        word = win32.DispatchEx("Word.Application")
+        word.Visible = False
+        word.DisplayAlerts = False
+        # ReadOnly so a document still open in Word can also be converted.
+        doc = word.Documents.Open(
+            os.path.abspath(path), ReadOnly=True, AddToRecentFiles=False,
+            Visible=False, ConfirmConversions=False,
+        )
+        handle = tempfile.NamedTemporaryFile(suffix=".htm", delete=False)
+        tmp_path = handle.name
+        handle.close()
+        doc.SaveAs2(tmp_path, FileFormat=wd_format_filtered_html)
+        doc.Close(False)
+        with open(tmp_path, "r", encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    except Exception:
+        return None
+    finally:
+        if word is not None:
+            try:
+                word.Quit()
+            except Exception:
+                pass
+        pythoncom.CoUninitialize()
+        if tmp_path and os.path.isfile(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
+def _load_report_markup(path: str) -> Optional[str]:
+    """Return HTML markup for a report regardless of its on-disk format.
+
+    HTML/JIRA exports are read directly; binary Word documents (whose extension
+    may still be ``.doc``/``.docx``) are detected by magic bytes and converted to
+    HTML through an installed Word. Returns ``None`` only when the file cannot be
+    read at all.
+    """
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read()
+    except PermissionError:
+        # File is likely locked open in Word; Word itself can still open it
+        # read-only, so attempt the COM conversion directly.
+        return _convert_word_to_html(path)
     except OSError:
         return None
+    if not raw:
+        return None
+
+    if raw.startswith(_OLE2_MAGIC) or raw.startswith(_ZIP_MAGIC):
+        converted = _convert_word_to_html(path)
+        if converted is not None:
+            return converted
+        # Word unavailable: best-effort so classification can still try the body.
+        return raw.decode("utf-8", errors="replace")
+
+    if _looks_like_html(raw):
+        return raw.decode("utf-8", errors="replace")
+
+    # Unknown text format: hand the decoded bytes to the HTML parser anyway.
+    return raw.decode("utf-8", errors="replace")
+
+
+def _parse_prose_report(soup: BeautifulSoup) -> Dict[str, object]:
+    """Extract fields from a narrative (HackerOne-style) report that has no JIRA
+    field table: pick a title, the affected host(s)/endpoint, and severity from
+    the free-form body."""
+    text = soup.get_text("\n", strip=True)
+    lines = [line.strip() for line in text.split("\n") if line.strip()]
+
+    # Some narrative templates still use "Label:" lines with the value on the
+    # following line(s); capture those blocks so we can prefer explicit fields.
+    sections: Dict[str, List[str]] = {}
+    current: Optional[str] = None
+    for line in lines:
+        if line.endswith(":") and len(line) <= 60:
+            current = line[:-1].strip().lower()
+            sections.setdefault(current, [])
+        elif current is not None:
+            sections[current].append(line)
+
+    def _section(label_names: tuple) -> List[str]:
+        for name in label_names:
+            if sections.get(name):
+                return sections[name]
+        return []
+
+    # Title/summary: prefer an explicit description block, else the first
+    # descriptive heading that is not itself a template label.
+    desc_vals = _section(_PROSE_DESC_LABELS)
+    title = " ".join(desc_vals[:3]).strip() if desc_vals else ""
+    if not title:
+        for tag in soup.find_all(["h1", "h2", "h3", "b", "strong"]):
+            candidate = tag.get_text(" ", strip=True)
+            if len(candidate) >= 12 and not candidate.rstrip().endswith(":"):
+                title = candidate
+                break
+    if not title:
+        for line in lines:
+            if len(line) >= 12 and not line.endswith(":"):
+                title = line
+                break
+
+    # Gather every plausible host referenced by a URL or an HTTP Host header.
+    hosts: List[str] = []
+    for match in _URL_RE.finditer(text):
+        candidate = (urlsplit(match.group(0)).hostname or "").lower()
+        if _HOSTNAME_RE.match(candidate):
+            hosts.append(candidate)
+    for match in _HOST_HDR_RE.finditer(text):
+        candidate = match.group(1).strip().lower()
+        if _HOSTNAME_RE.match(candidate):
+            hosts.append(candidate)
+
+    # Prefer a URL from an explicit "affected URL" block when present.
+    url = ""
+    for value in _section(_PROSE_URL_LABELS):
+        match = _URL_RE.search(value)
+        if match:
+            url = match.group(0).rstrip(".,);]}")
+            break
+
+    # Primary host: the affected-URL host, else one named in the title, else the
+    # most-referenced host in the report.
+    primary = (urlsplit(url).hostname or "").lower() if url else ""
+    if not primary:
+        title_lower = title.lower()
+        for candidate in hosts:
+            if candidate in title_lower:
+                primary = candidate
+                break
+    if not primary and hosts:
+        primary = Counter(hosts).most_common(1)[0][0]
+
+    # Representative URL for the primary host: a full URL if one exists, else a
+    # request-line path stitched onto the host, else just the host root.
+    if not url and primary:
+        for match in _URL_RE.finditer(text):
+            candidate = match.group(0).rstrip(".,);]}")
+            if (urlsplit(candidate).hostname or "").lower() == primary:
+                url = candidate
+                break
+    if not url and primary:
+        req = _REQ_LINE_RE.search(text)
+        url = f"https://{primary}{req.group(1) if req else '/'}"
+
+    split = urlsplit(url) if url else None
+    severity_match = _SEVERITY_RE.search(title) or _SEVERITY_RE.search(text[-600:])
+    return {
+        "title": title,
+        "class_text": f"{title}\n{text[:2500]}",
+        "url": url,
+        "host": (split.hostname or "").lower() if split else primary,
+        "path": split.path if split else "",
+        "params": sorted(parse_qs(split.query).keys()) if split and split.query else [],
+        "all_hosts": sorted(set(hosts)),
+        "severity": (severity_match.group(1).capitalize() if severity_match else ""),
+    }
+
+
+def parse_report(path: str) -> Optional[HistoricalFinding]:
+    """Parse a single exported report file into a :class:`HistoricalFinding`."""
+    markup = _load_report_markup(path)
+    if markup is None:
+        return None
+    soup = BeautifulSoup(markup, "html.parser")
 
     title = soup.title.get_text(" ", strip=True) if soup.title else ""
     fields = _extract_fields(soup)
 
     id_match = _TITLE_ID_RE.search(title)
     ticket_id = id_match.group(1) if id_match else os.path.splitext(os.path.basename(path))[0]
+
+    # Narrative reports (no JIRA field table) need free-form extraction instead.
+    is_jira = _WEAKNESS_LABEL in fields or _URL_LABEL in fields
+    if not is_jira:
+        prose = _parse_prose_report(soup)
+        prose_title = str(prose["title"])
+        vulnerability, cwe, owasp, detector = _classify_weakness(str(prose["class_text"]))
+        all_hosts = prose["all_hosts"] if isinstance(prose["all_hosts"], list) else []
+        extra_hosts = [h for h in all_hosts if h != prose["host"]]
+        labels = ["prose-report"] + ([f"severity:{prose['severity']}"] if prose["severity"] else [])
+        labels += [f"host:{h}" for h in extra_hosts[:10]]
+        return HistoricalFinding(
+            ticket_id=ticket_id,
+            summary=(prose_title or ticket_id)[:300],
+            weakness_raw=(prose_title or vulnerability)[:200],
+            vulnerability=vulnerability,
+            cwe=cwe,
+            owasp=owasp,
+            detector=detector,
+            url=str(prose["url"]),
+            host=str(prose["host"]),
+            path=str(prose["path"]),
+            parameters=list(prose["params"]) if isinstance(prose["params"], list) else [],
+            status=(f"Reporter-stated severity: {prose['severity']}" if prose["severity"] else ""),
+            labels=labels,
+            reporter="",
+            source_file=os.path.basename(path),
+        )
 
     summary = title
     if "]" in title:
