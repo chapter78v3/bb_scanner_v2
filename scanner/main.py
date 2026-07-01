@@ -249,6 +249,41 @@ def build_parser() -> argparse.ArgumentParser:
              "medium/high-confidence) findings back into the knowledge base so future scans "
              "start smarter. Creates the knowledge base file if it does not exist yet.",
     )
+    parser.add_argument(
+        "--subdomain-discovery",
+        action="store_true",
+        help="Enumerate subdomains of the target's registrable domain (Certificate "
+             "Transparency + DNS brute force) and add discovered hosts as scan seeds. "
+             "Dramatically improves subdomain-takeover coverage.",
+    )
+    parser.add_argument(
+        "--subdomain-wordlist",
+        default=None,
+        help="Optional extra wordlist of subdomain labels (one per line) appended to the "
+             "built-in list for the DNS brute-force phase.",
+    )
+    parser.add_argument(
+        "--subdomain-max",
+        type=int,
+        default=300,
+        help="Maximum number of discovered subdomains to seed into the scan (default: 300).",
+    )
+    parser.add_argument(
+        "--subdomain-concurrency",
+        type=int,
+        default=20,
+        help="Concurrent DNS resolutions during subdomain discovery (default: 20).",
+    )
+    parser.add_argument(
+        "--no-subdomain-ct",
+        action="store_true",
+        help="Skip the Certificate Transparency (crt.sh) source during subdomain discovery.",
+    )
+    parser.add_argument(
+        "--no-subdomain-bruteforce",
+        action="store_true",
+        help="Skip the DNS brute-force phase during subdomain discovery (use CT logs only).",
+    )
     return parser
 
 
@@ -310,6 +345,12 @@ def main() -> int:
         knowledge_base_path=None if args.no_knowledge_base else args.knowledge_base,
         kb_generalize=args.kb_generalize,
         kb_learn=args.kb_learn,
+        subdomain_discovery=args.subdomain_discovery,
+        subdomain_wordlist=args.subdomain_wordlist,
+        subdomain_max=args.subdomain_max,
+        subdomain_concurrency=args.subdomain_concurrency,
+        subdomain_ct=not args.no_subdomain_ct,
+        subdomain_bruteforce=not args.no_subdomain_bruteforce,
     )
 
     findings = scanner.run()

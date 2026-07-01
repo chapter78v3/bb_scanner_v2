@@ -97,6 +97,15 @@ class ReportingEngine:
                     if kb.get("learn_error"):
                         line += f" (save failed: {kb.get('learn_error')})"
                     print(line)
+            sub = stats.get("subdomain_discovery", {})
+            if sub.get("enabled"):
+                print(
+                    "Subdomain discovery: "
+                    f"apex={sub.get('apex', 'n/a')}, "
+                    f"ct_hosts={sub.get('ct_hosts', 0)}, "
+                    f"brute_resolved={sub.get('brute_hosts_resolved', 0)}, "
+                    f"seeded={sub.get('seeded', 0)}"
+                )
             for detector in stats.get("detectors", []):
                 error = detector.get("error")
                 status = "error" if error else "ok"

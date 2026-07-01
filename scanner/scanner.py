@@ -14,6 +14,7 @@ from .oast import build_oast_client
 from .registry import DetectorRegistry
 from .renderer import JSRenderer
 from .request_engine import RequestEngine
+from .subdomain_discovery import SubdomainDiscovery
 
 
 class Scanner:
@@ -66,6 +67,12 @@ class Scanner:
         knowledge_base_path: str | None = None,
         kb_generalize: bool = False,
         kb_learn: bool = False,
+        subdomain_discovery: bool = False,
+        subdomain_wordlist: str | None = None,
+        subdomain_max: int = 300,
+        subdomain_concurrency: int = 20,
+        subdomain_ct: bool = True,
+        subdomain_bruteforce: bool = True,
     ) -> None:
         self.target_url = target_url
         self.allow_external = allow_external
@@ -182,8 +189,41 @@ class Scanner:
                 cookies=cookies,
             )
 
+        # Attack-surface expansion: enumerate subdomains and feed live/known ones
+        # back as seeds so takeover + passive detectors cover forgotten hosts.
+        self.subdomain_discovery = None
+        if subdomain_discovery:
+            self.subdomain_discovery = SubdomainDiscovery(
+                engine=self.engine,
+                wordlist_path=subdomain_wordlist,
+                max_subdomains=subdomain_max,
+                concurrency=subdomain_concurrency,
+                use_ct=subdomain_ct,
+                use_bruteforce=subdomain_bruteforce,
+            )
+
     def run(self) -> List[Finding]:
         preflight = self._preflight()
+
+        # Attack-surface expansion runs first so discovered subdomains are seeded
+        # before crawling and are visible to every detector (esp. takeover).
+        subdomain_stats: Dict[str, object] = {"enabled": self.subdomain_discovery is not None}
+        if self.subdomain_discovery is not None:
+            sub_result = self.subdomain_discovery.discover(self.target_url)
+            for host in sub_result.seed_hosts:
+                seed = f"https://{host}/"
+                if seed not in self.seed_urls:
+                    self.seed_urls.append(seed)
+            subdomain_stats = {
+                "enabled": True,
+                "apex": sub_result.apex,
+                "ct_hosts": sub_result.ct_count,
+                "brute_hosts_resolved": sub_result.brute_count,
+                "resolved_total": len(sub_result.resolved_hosts),
+                "seeded": len(sub_result.seed_hosts),
+                "sample_hosts": sub_result.seed_hosts[:20],
+                "errors": sub_result.errors,
+            }
 
         # Forced browsing: probe the wordlist for unlinked paths before crawling
         # so any live paths are both crawled and tested by every detector.
@@ -335,6 +375,7 @@ class Scanner:
             "oast_interactions": oast_interactions,
             "nuclei": nuclei_stats,
             "knowledge_base": kb_stats,
+            "subdomain_discovery": subdomain_stats,
             "preflight": preflight,
             "configuration": {
                 "seed_urls": self.seed_urls,
