@@ -4,7 +4,7 @@ from typing import List
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from ..models import Finding, ScanContext
-from ..payloads import SSRF_PARAM_HINTS, SSRF_TEST_VALUES
+from ..payloads import SSRF_PARAM_HINTS, SSRF_TEST_VALUES, match_ssrf_markers
 from ..registry import DetectorPlugin
 from ..request_engine import RequestEngine
 
@@ -23,6 +23,10 @@ class SSRFDetector(DetectorPlugin):
             if not params:
                 continue
 
+            # Baseline body (original values) so connection-error text that is
+            # simply part of the page can't be mistaken for an SSRF signal.
+            baseline_body_l = self._safe_get_text(engine, url).lower()
+
             for param in params:
                 if not self._looks_like_ssrf_param(param):
                     continue
@@ -38,26 +42,65 @@ class SSRFDetector(DetectorPlugin):
                     except Exception:
                         continue
 
-                    body_l = response.text.lower()
-                    if any(marker in body_l for marker in ["connection refused", "localhost", "127.0.0.1", "timed out"]):
+                    hit = match_ssrf_markers(response.text)
+                    if hit is None:
+                        continue
+                    kind, marker = hit
+                    # Absence check: the marker must be introduced by our probe,
+                    # not already present on the unmodified page.
+                    if marker in baseline_body_l:
+                        continue
+
+                    if kind == "metadata":
                         findings.append(
                             Finding(
-                                vulnerability="Potential SSRF",
+                                vulnerability="SSRF (cloud metadata reflected)",
                                 severity="high",
                                 cwe="CWE-918",
                                 owasp="A10:2021 SSRF",
                                 url=test_url,
                                 parameter=param,
-                                description="Endpoint exhibited SSRF-like behavior after URL probe.",
-                                evidence=f"Probe={probe}; status={response.status_code}",
+                                description=(
+                                    "Cloud instance-metadata content was returned after pointing the "
+                                    "parameter at a metadata endpoint — the server fetched it on our behalf."
+                                ),
+                                evidence=f"probe={probe}; marker={marker!r}; status={response.status_code}",
+                                detector=self.name,
+                                confidence="high",
+                                references=["https://portswigger.net/web-security/ssrf"],
+                            )
+                        )
+                        break
+                    else:  # connection-error signature: weak in-band signal
+                        findings.append(
+                            Finding(
+                                vulnerability="Potential SSRF (server-side fetch error)",
+                                severity="medium",
+                                cwe="CWE-918",
+                                owasp="A10:2021 SSRF",
+                                url=test_url,
+                                parameter=param,
+                                description=(
+                                    "A server-side connection-error signature appeared after an internal "
+                                    "URL probe and was absent from the baseline, suggesting the server "
+                                    "attempted the outbound request. Confirm out-of-band."
+                                ),
+                                evidence=f"probe={probe}; marker={marker!r}; status={response.status_code}",
                                 detector=self.name,
                                 confidence="low",
-                                references=["Out-of-band SSRF validation recommended."],
+                                references=["Out-of-band SSRF validation recommended (see --oast-server)."],
                             )
                         )
                         break
 
         return findings
+
+    @staticmethod
+    def _safe_get_text(engine: RequestEngine, url: str) -> str:
+        try:
+            return engine.get(url).text
+        except Exception:
+            return ""
 
     @staticmethod
     def _looks_like_ssrf_param(param_name: str) -> bool:

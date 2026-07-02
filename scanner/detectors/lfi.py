@@ -7,8 +7,8 @@ from ..models import Finding, ScanContext
 from ..payloads import (
     LFI_FILE_SCHEME_PAYLOADS,
     LFI_PARAM_HINTS,
-    LFI_RESPONSE_MARKERS,
     LFI_TRAVERSAL_PAYLOADS,
+    match_lfi,
 )
 from ..registry import DetectorPlugin
 from ..request_engine import RequestEngine
@@ -48,6 +48,8 @@ class LFIDetector(DetectorPlugin):
         if not params:
             return findings
 
+        baseline_body_l = self._safe_get_text(engine, url).lower()
+
         for param in params:
             if not context.lfi_aggressive and not self._looks_like_lfi_param(param):
                 continue
@@ -60,7 +62,8 @@ class LFIDetector(DetectorPlugin):
                 if response is None:
                     continue
 
-                if self._contains_lfi_marker(response.text):
+                sig = match_lfi(response.text)
+                if sig and sig.lower() not in baseline_body_l:
                     findings.append(
                         Finding(
                             vulnerability="Potential Local File Inclusion / Arbitrary File Read",
@@ -70,10 +73,10 @@ class LFIDetector(DetectorPlugin):
                             url=test_url,
                             parameter=param,
                             description=(
-                                "Application response contains known local file content markers "
-                                "after a file/path payload."
+                                "A leaked system-file signature appeared after a file/path payload "
+                                "and was absent from the baseline response."
                             ),
-                            evidence=self._extract_evidence(response.text),
+                            evidence=f"signature={sig!r}; {self._extract_evidence(response.text)}",
                             detector=self.name,
                             confidence="medium",
                             references=["Validate manually to confirm file-read primitive and scope of access."],
@@ -89,6 +92,9 @@ class LFIDetector(DetectorPlugin):
             return findings
 
         base = {field.name: (field.value or "scan") for field in fields}
+        baseline_resp = self._safe_submit(engine, action_url, method, base)
+        baseline_body_l = baseline_resp.text.lower() if baseline_resp is not None else ""
+
         for field in fields:
             if not context.lfi_aggressive and not self._looks_like_lfi_param(field.name):
                 continue
@@ -100,7 +106,8 @@ class LFIDetector(DetectorPlugin):
                 if response is None:
                     continue
 
-                if self._contains_lfi_marker(response.text):
+                sig = match_lfi(response.text)
+                if sig and sig.lower() not in baseline_body_l:
                     findings.append(
                         Finding(
                             vulnerability="Potential Local File Inclusion / Arbitrary File Read",
@@ -109,8 +116,11 @@ class LFIDetector(DetectorPlugin):
                             owasp="A05:2021 Security Misconfiguration",
                             url=action_url,
                             parameter=field.name,
-                            description="Form submission reflected known local file markers.",
-                            evidence=self._extract_evidence(response.text),
+                            description=(
+                                "A leaked system-file signature appeared after a form file/path payload "
+                                "and was absent from the baseline response."
+                            ),
+                            evidence=f"signature={sig!r}; {self._extract_evidence(response.text)}",
                             detector=self.name,
                             confidence="medium",
                             references=["Validate manually to confirm file-read primitive and scope of access."],
@@ -136,9 +146,11 @@ class LFIDetector(DetectorPlugin):
         return p in LFI_PARAM_HINTS or any(hint in p for hint in LFI_PARAM_HINTS)
 
     @staticmethod
-    def _contains_lfi_marker(body: str) -> bool:
-        body_l = body.lower()
-        return any(marker.lower() in body_l for marker in LFI_RESPONSE_MARKERS)
+    def _safe_get_text(engine: RequestEngine, url: str) -> str:
+        try:
+            return engine.get(url).text
+        except Exception:
+            return ""
 
     @staticmethod
     def _extract_evidence(body: str, max_chars: int = 220) -> str:
