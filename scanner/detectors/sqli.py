@@ -6,7 +6,7 @@ from typing import Dict, List
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from ..models import Finding, ScanContext
-from ..payloads import SQL_ERROR_PATTERNS, SQLI_ERROR_PAYLOADS, SQLI_PARAM_HINTS, SQLI_TIME_DIFF_PAIRS, SQLI_TIME_PAYLOADS
+from ..payloads import SQLI_ERROR_PAYLOADS, SQLI_PARAM_HINTS, SQLI_TIME_DIFF_PAIRS, SQLI_TIME_PAYLOADS, match_sql_error
 from ..registry import DetectorPlugin
 from ..request_engine import RequestEngine
 
@@ -24,7 +24,7 @@ class SQLiDetector(DetectorPlugin):
             findings.extend(self._test_url_query_params(url, engine, context, probes))
 
         for form in context.crawl.forms:
-            findings.extend(self._test_form(form.action_url, form.method, form.fields, engine))
+            findings.extend(self._test_form(form.action_url, form.method, form.fields, engine, context, probes))
 
         return findings
 
@@ -66,6 +66,11 @@ class SQLiDetector(DetectorPlugin):
                 },
             )
 
+            # Baseline body (unmodified params) so an error signature that is
+            # ALWAYS present on the page cannot be mistaken for injection.
+            baseline_body = self._safe_get_body(engine, self._with_params(candidate_url, query_params))
+            baseline_body_l = (baseline_body or "").lower()
+
             for param in param_candidates:
                 for payload in self._error_payloads(context):
                     mutated = dict(query_params)
@@ -87,8 +92,9 @@ class SQLiDetector(DetectorPlugin):
                             },
                         )
                         continue
-                    body_l = response.text.lower()
-                    if any(pattern in body_l for pattern in SQL_ERROR_PATTERNS):
+                    sig = match_sql_error(response.text)
+                    marker = bool(sig) and (sig.lower() not in baseline_body_l)
+                    if marker:
                         findings.append(
                             Finding(
                                 vulnerability="SQL Injection (Error-based)",
@@ -97,8 +103,11 @@ class SQLiDetector(DetectorPlugin):
                                 owasp="A03:2021 Injection",
                                 url=test_url,
                                 parameter=param,
-                                description="Response contains database error patterns after SQLi probe.",
-                                evidence=self._truncate_evidence(response.text),
+                                description=(
+                                    "A DBMS error signature appeared after the SQLi probe and "
+                                    "was not present in the baseline response."
+                                ),
+                                evidence=f"signature={sig!r}; {self._truncate_evidence(response.text)}",
                                 detector=self.name,
                                 confidence="medium",
                             )
@@ -113,6 +122,7 @@ class SQLiDetector(DetectorPlugin):
                                 "payload": payload,
                                 "status_code": response.status_code,
                                 "marker_match": True,
+                                "signature": sig,
                             },
                         )
                         break
@@ -126,6 +136,7 @@ class SQLiDetector(DetectorPlugin):
                             "payload": payload,
                             "status_code": response.status_code,
                             "marker_match": False,
+                            "signature": sig,
                         },
                     )
 
@@ -265,23 +276,104 @@ class SQLiDetector(DetectorPlugin):
 
         return findings
 
-    def _test_form(self, action_url: str, method: str, fields, engine: RequestEngine) -> List[Finding]:
+    def _test_form(
+        self,
+        action_url: str,
+        method: str,
+        fields,
+        engine: RequestEngine,
+        context: ScanContext,
+        probes: List[Dict[str, object]],
+    ) -> List[Finding]:
         findings: List[Finding] = []
         if not fields:
             return findings
 
+        method = (method or "GET").upper()
         baseline_data = {field.name: (field.value or "test") for field in fields}
-        baseline = self._timed_submit(engine, action_url, method, baseline_data)
+
+        # Statistical baseline (median + MAD) shared by every field on this form,
+        # mirroring the query-parameter path so form injection points get the
+        # same timing rigor instead of a single sample vs. a hardcoded delta.
+        baseline_stats, baseline_err = self._timed_submit_samples(
+            engine, action_url, method, baseline_data, context.sqli_baseline_samples
+        )
+        if baseline_stats is None:
+            self._record_probe(
+                context,
+                probes,
+                {
+                    "target": "form",
+                    "mode": "baseline",
+                    "url": action_url,
+                    "method": method,
+                    "samples": context.sqli_baseline_samples,
+                    "status": "error",
+                    "error": "baseline submit failed",
+                    **(baseline_err or {}),
+                },
+            )
+            return findings
+        baseline_median, baseline_mad = baseline_stats
+        dynamic_threshold = max(context.sqli_time_threshold, baseline_mad * 5)
+        self._record_probe(
+            context,
+            probes,
+            {
+                "target": "form",
+                "mode": "baseline",
+                "url": action_url,
+                "method": method,
+                "samples": context.sqli_baseline_samples,
+                "status": "ok",
+                "median": round(baseline_median, 4),
+                "mad": round(baseline_mad, 4),
+            },
+        )
+
+        # Baseline body (unmodified fields) for the error-absence check.
+        _bb = self._submit(engine, action_url, method, baseline_data)
+        baseline_body_l = _bb.text.lower() if _bb is not None else ""
 
         for field in fields:
-            for payload in SQLI_ERROR_PAYLOADS:
+            # --- Error-based ---
+            for payload in self._error_payloads(context):
                 data = dict(baseline_data)
                 data[field.name] = payload
                 response = self._submit(engine, action_url, method, data)
                 if response is None:
+                    self._record_probe(
+                        context,
+                        probes,
+                        {
+                            "target": "form",
+                            "mode": "error",
+                            "url": action_url,
+                            "method": method,
+                            "parameter": field.name,
+                            "payload": payload,
+                            "status": "error",
+                        },
+                    )
                     continue
-                body_l = response.text.lower()
-                if any(pattern in body_l for pattern in SQL_ERROR_PATTERNS):
+                sig = match_sql_error(response.text)
+                marker = bool(sig) and (sig.lower() not in baseline_body_l)
+                self._record_probe(
+                    context,
+                    probes,
+                    {
+                        "target": "form",
+                        "mode": "error",
+                        "url": action_url,
+                        "method": method,
+                        "parameter": field.name,
+                        "payload": payload,
+                        "status_code": response.status_code,
+                        "marker_match": marker,
+                        "signature": sig,
+                    },
+                )
+                if marker:
                     findings.append(
                         Finding(
                             vulnerability="SQL Injection (Error-based)",
@@ -290,35 +382,152 @@ class SQLiDetector(DetectorPlugin):
                             owasp="A03:2021 Injection",
                             url=action_url,
                             parameter=field.name,
-                            description="Form response indicates SQL error after probe.",
-                            evidence=self._truncate_evidence(response.text),
+                            description=(
+                                "A DBMS error signature appeared after the form probe and was "
+                                "not present in the baseline response."
+                            ),
+                            evidence=f"signature={sig!r}; {self._truncate_evidence(response.text)}",
                             detector=self.name,
                             confidence="medium",
                         )
                     )
                     break
 
-            if baseline is not None:
-                for payload in SQLI_TIME_PAYLOADS:
-                    data = dict(baseline_data)
-                    data[field.name] = payload
-                    elapsed = self._timed_submit(engine, action_url, method, data)
-                    if elapsed is not None and elapsed - baseline > 2.2:
-                        findings.append(
-                            Finding(
-                                vulnerability="SQL Injection (Time-based)",
-                                severity="high",
-                                cwe="CWE-89",
-                                owasp="A03:2021 Injection",
-                                url=action_url,
-                                parameter=field.name,
-                                description="Form response delay increased after time-based SQL payload.",
-                                evidence=f"Baseline={baseline:.2f}s, Test={elapsed:.2f}s, Payload={payload}",
-                                detector=self.name,
-                                confidence="low",
-                            )
+            # --- Time-based (single-delay) ---
+            for payload in self._time_payloads(context):
+                data = dict(baseline_data)
+                data[field.name] = payload
+                test_stats, test_err = self._timed_submit_samples(
+                    engine, action_url, method, data, context.sqli_test_samples
+                )
+                if test_stats is None:
+                    self._record_probe(
+                        context,
+                        probes,
+                        {
+                            "target": "form",
+                            "mode": "time",
+                            "url": action_url,
+                            "method": method,
+                            "parameter": field.name,
+                            "payload": payload,
+                            "samples": context.sqli_test_samples,
+                            "status": "error",
+                            "error": "timing submit failed",
+                            **(test_err or {}),
+                        },
+                    )
+                    continue
+                test_median, _ = test_stats
+                positive = test_median - baseline_median > dynamic_threshold
+                self._record_probe(
+                    context,
+                    probes,
+                    {
+                        "target": "form",
+                        "mode": "time",
+                        "url": action_url,
+                        "method": method,
+                        "parameter": field.name,
+                        "payload": payload,
+                        "baseline_median": round(baseline_median, 4),
+                        "test_median": round(test_median, 4),
+                        "threshold": round(dynamic_threshold, 4),
+                        "signal": "positive" if positive else "negative",
+                    },
+                )
+                if positive:
+                    findings.append(
+                        Finding(
+                            vulnerability="SQL Injection (Time-based)",
+                            severity="high",
+                            cwe="CWE-89",
+                            owasp="A03:2021 Injection",
+                            url=action_url,
+                            parameter=field.name,
+                            description="Form response delay significantly increased after time-based SQL payload.",
+                            evidence=(
+                                f"BaselineMedian={baseline_median:.2f}s, TestMedian={test_median:.2f}s, "
+                                f"Threshold={dynamic_threshold:.2f}s, Payload={payload}"
+                            ),
+                            detector=self.name,
+                            confidence="low",
                         )
-                        break
+                    )
+                    break
+
+            # --- Time-based differential (strongest timing signal) ---
+            for pair in self._time_diff_pairs(context):
+                true_data = dict(baseline_data)
+                true_data[field.name] = pair["true"]
+                false_data = dict(baseline_data)
+                false_data[field.name] = pair["false"]
+                true_stats, true_err = self._timed_submit_samples(
+                    engine, action_url, method, true_data, context.sqli_test_samples
+                )
+                false_stats, false_err = self._timed_submit_samples(
+                    engine, action_url, method, false_data, context.sqli_test_samples
+                )
+                if true_stats is None or false_stats is None:
+                    self._record_probe(
+                        context,
+                        probes,
+                        {
+                            "target": "form",
+                            "mode": "time_diff",
+                            "url": action_url,
+                            "method": method,
+                            "parameter": field.name,
+                            "pair": pair["name"],
+                            "samples": context.sqli_test_samples,
+                            "status": "error",
+                            "error": "true/false timing submit failed",
+                            "true_error": true_err,
+                            "false_error": false_err,
+                        },
+                    )
+                    continue
+                true_median, _ = true_stats
+                false_median, _ = false_stats
+                delta = true_median - false_median
+                positive = delta > dynamic_threshold
+                self._record_probe(
+                    context,
+                    probes,
+                    {
+                        "target": "form",
+                        "mode": "time_diff",
+                        "url": action_url,
+                        "method": method,
+                        "parameter": field.name,
+                        "pair": pair["name"],
+                        "true_median": round(true_median, 4),
+                        "false_median": round(false_median, 4),
+                        "delta": round(delta, 4),
+                        "threshold": round(dynamic_threshold, 4),
+                        "signal": "positive" if positive else "negative",
+                    },
+                )
+                if positive:
+                    findings.append(
+                        Finding(
+                            vulnerability="SQL Injection (Time-based Differential)",
+                            severity="high",
+                            cwe="CWE-89",
+                            owasp="A03:2021 Injection",
+                            url=action_url,
+                            parameter=field.name,
+                            description="True/False timing differential indicates SQL expression control in a form field.",
+                            evidence=(
+                                f"Pair={pair['name']}, TrueMedian={true_median:.2f}s, "
+                                f"FalseMedian={false_median:.2f}s, Delta={delta:.2f}s, "
+                                f"Threshold={dynamic_threshold:.2f}s"
+                            ),
+                            detector=self.name,
+                            confidence="medium",
+                        )
+                    )
+                    break
 
         return findings
 
@@ -328,6 +537,13 @@ class SQLiDetector(DetectorPlugin):
             if method.upper() == "POST":
                 return engine.post(action_url, data=data)
             return engine.get(action_url, params=data)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _safe_get_body(engine: RequestEngine, url: str):
+        try:
+            return engine.get(url).text
         except Exception:
             return None
 
@@ -349,23 +565,38 @@ class SQLiDetector(DetectorPlugin):
         return (median, mad), None
 
     @staticmethod
+    def _timed_submit_samples(engine: RequestEngine, action_url: str, method: str, data: Dict[str, str], samples_count: int):
+        """Collect timing samples for a form submission; return (median, mad).
+
+        Mirrors ``_timed_get_samples`` but is method-aware (GET params vs POST
+        body) so form injection points get the same statistical treatment as
+        query parameters.
+        """
+        samples: List[float] = []
+        is_post = method.upper() == "POST"
+        for _ in range(samples_count):
+            start = time.monotonic()
+            try:
+                if is_post:
+                    engine.post(action_url, data=data)
+                else:
+                    engine.get(action_url, params=data)
+            except Exception as exc:
+                return None, SQLiDetector._error_details(exc)
+            samples.append(time.monotonic() - start)
+        if not samples:
+            return None, {"error": "no timing samples collected"}
+        median = statistics.median(samples)
+        abs_dev = [abs(x - median) for x in samples]
+        mad = statistics.median(abs_dev) if abs_dev else 0.0
+        return (median, mad), None
+
+    @staticmethod
     def _error_details(exc: Exception) -> Dict[str, str]:
         return {
             "error_type": type(exc).__name__,
             "error": str(exc)[:300],
         }
-
-    @staticmethod
-    def _timed_submit(engine: RequestEngine, action_url: str, method: str, data: Dict[str, str]):
-        start = time.monotonic()
-        try:
-            if method.upper() == "POST":
-                engine.post(action_url, data=data)
-            else:
-                engine.get(action_url, params=data)
-        except Exception:
-            return None
-        return time.monotonic() - start
 
     @staticmethod
     def _truncate_evidence(text: str, max_chars: int = 220) -> str:
