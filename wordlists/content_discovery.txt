@@ -24,6 +24,7 @@ adminer.php
 pma
 myadmin
 sqladmin
+ws
 
 # --- Authentication ---
 login
