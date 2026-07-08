@@ -175,6 +175,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Cap the number of content-discovery paths probed. 0 means use the whole wordlist.",
     )
     parser.add_argument(
+        "--no-api-discovery",
+        action="store_true",
+        help="Disable well-known API definition discovery (OpenAPI/Swagger specs, GraphQL "
+             "endpoints, and WSDL) which is enabled by default.",
+    )
+    parser.add_argument(
+        "--api-discovery-max-paths",
+        type=int,
+        default=0,
+        help="Cap the number of well-known API paths probed per category. 0 means probe all.",
+    )
+    parser.add_argument(
+        "--no-fingerprint",
+        action="store_true",
+        help="Disable passive technology fingerprinting (enabled by default), which identifies "
+             "the stack and flags known-vulnerable components.",
+    )
+    parser.add_argument(
         "--nuclei",
         action="store_true",
         help="Run ProjectDiscovery nuclei over discovered URLs and merge its findings (requires nuclei on PATH).",
@@ -284,6 +302,42 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip the DNS brute-force phase during subdomain discovery (use CT logs only).",
     )
+    parser.add_argument(
+        "--ssti-max-payloads",
+        type=int,
+        default=0,
+        help="Cap SSTI expression templates tried per parameter. 0 means use all.",
+    )
+    parser.add_argument(
+        "--cmdi-max-payloads",
+        type=int,
+        default=0,
+        help="Cap command-injection sleep templates tried per parameter. 0 means use all.",
+    )
+    parser.add_argument(
+        "--cmdi-time-threshold",
+        type=float,
+        default=4.0,
+        help="Minimum sleep-vs-control timing delta in seconds to flag command injection.",
+    )
+    parser.add_argument(
+        "--cmdi-baseline-samples",
+        type=int,
+        default=2,
+        help="Baseline timing sample count per injection point for command injection.",
+    )
+    parser.add_argument(
+        "--cmdi-test-samples",
+        type=int,
+        default=2,
+        help="Probe timing sample count per command-injection payload.",
+    )
+    parser.add_argument(
+        "--xxe-max-payloads",
+        type=int,
+        default=0,
+        help="Cap in-band XXE templates tried per endpoint. 0 means use all.",
+    )
     return parser
 
 
@@ -319,6 +373,12 @@ def main() -> int:
         sqli_baseline_samples=args.sqli_baseline_samples,
         sqli_test_samples=args.sqli_test_samples,
         sqli_probe_log_limit=args.sqli_probe_log_limit,
+        ssti_max_payloads=args.ssti_max_payloads,
+        cmdi_max_payloads=args.cmdi_max_payloads,
+        cmdi_time_threshold=args.cmdi_time_threshold,
+        cmdi_baseline_samples=args.cmdi_baseline_samples,
+        cmdi_test_samples=args.cmdi_test_samples,
+        xxe_max_payloads=args.xxe_max_payloads,
         verify_tls=not args.insecure,
         proxy=args.proxy,
         max_retries=args.max_retries,
@@ -333,6 +393,9 @@ def main() -> int:
         wordlist_path=args.wordlist,
         discovery_extensions=args.discovery_extension,
         discovery_max_paths=args.discovery_max_paths,
+        api_discovery=not args.no_api_discovery,
+        api_discovery_max_paths=args.api_discovery_max_paths,
+        fingerprint=not args.no_fingerprint,
         nuclei=args.nuclei,
         nuclei_path=args.nuclei_path,
         nuclei_templates=args.nuclei_templates,

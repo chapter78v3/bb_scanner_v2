@@ -81,8 +81,16 @@ class ScanContext:
     sqli_baseline_samples: int = 3
     sqli_test_samples: int = 3
     sqli_probe_log_limit: int = 200
+    # Injection detectors (SSTI / command injection / XXE).
+    ssti_max_payloads: int = 0
+    cmdi_max_payloads: int = 0
+    cmdi_time_threshold: float = 4.0
+    cmdi_baseline_samples: int = 2
+    cmdi_test_samples: int = 2
+    xxe_max_payloads: int = 0
     seed_urls: List[str] = field(default_factory=list)
     oast: Any = None
     secondary_engine: Any = None
     renderer: Any = None
+    technologies: List[str] = field(default_factory=list)
     metadata: Dict[str, str] = field(default_factory=dict)

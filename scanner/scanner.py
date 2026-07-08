@@ -8,6 +8,8 @@ from .content_discovery import ContentDiscovery
 from .crawler import WebCrawler
 from .detectors import DEFAULT_DETECTORS
 from .knowledge_base import KnowledgeBase
+from .api_discovery import APISpecDiscovery
+from .fingerprint import Fingerprinter
 from .models import Finding, ScanContext
 from .nuclei import NucleiRunner
 from .oast import build_oast_client
@@ -41,6 +43,12 @@ class Scanner:
         sqli_baseline_samples: int = 3,
         sqli_test_samples: int = 3,
         sqli_probe_log_limit: int = 200,
+        ssti_max_payloads: int = 0,
+        cmdi_max_payloads: int = 0,
+        cmdi_time_threshold: float = 4.0,
+        cmdi_baseline_samples: int = 2,
+        cmdi_test_samples: int = 2,
+        xxe_max_payloads: int = 0,
         verify_tls: bool = True,
         proxy: str | None = None,
         max_retries: int = 2,
@@ -55,6 +63,9 @@ class Scanner:
         wordlist_path: str | None = None,
         discovery_extensions: List[str] | None = None,
         discovery_max_paths: int = 0,
+        api_discovery: bool = True,
+        api_discovery_max_paths: int = 0,
+        fingerprint: bool = True,
         nuclei: bool = False,
         nuclei_path: str = "nuclei",
         nuclei_templates: List[str] | None = None,
@@ -88,6 +99,12 @@ class Scanner:
         self.sqli_baseline_samples = max(1, sqli_baseline_samples)
         self.sqli_test_samples = max(1, sqli_test_samples)
         self.sqli_probe_log_limit = max(10, sqli_probe_log_limit)
+        self.ssti_max_payloads = max(0, ssti_max_payloads)
+        self.cmdi_max_payloads = max(0, cmdi_max_payloads)
+        self.cmdi_time_threshold = max(0.5, cmdi_time_threshold)
+        self.cmdi_baseline_samples = max(1, cmdi_baseline_samples)
+        self.cmdi_test_samples = max(1, cmdi_test_samples)
+        self.xxe_max_payloads = max(0, xxe_max_payloads)
         self.concurrency = max(1, concurrency)
         self.oast_client = build_oast_client(oast_server, use_interactsh=oast_interactsh)
         self.last_run_stats: Dict[str, object] = {}
@@ -172,6 +189,14 @@ class Scanner:
                 concurrency=self.concurrency,
                 extra_words=self.kb_learned_paths,
             )
+        self.api_discovery = None
+        if api_discovery:
+            self.api_discovery = APISpecDiscovery(
+                engine=self.engine,
+                concurrency=self.concurrency,
+                max_paths=api_discovery_max_paths,
+            )
+        self.fingerprinter = Fingerprinter(self.engine) if fingerprint else None
         self.nuclei_runner = None
         if nuclei:
             self.nuclei_runner = NucleiRunner(
@@ -235,10 +260,53 @@ class Scanner:
                 if path not in self.seed_urls:
                     self.seed_urls.append(path)
 
+        # API-aware discovery: find and validate OpenAPI/Swagger specs, GraphQL
+        # endpoints, and WSDL definitions at their conventional locations, then
+        # seed the confirmed URLs so every detector tests them too.
+        api_findings: List[Finding] = []
+        api_stats: Dict[str, object] = {"enabled": self.api_discovery is not None}
+        self.api_specs = []
+        if self.api_discovery is not None:
+            api_result = self.api_discovery.discover(self.target_url)
+            api_findings = api_result.findings
+            self.api_specs = api_result.specs
+            for url in api_result.discovered_urls:
+                if url not in self.seed_urls:
+                    self.seed_urls.append(url)
+            api_stats = {
+                "enabled": True,
+                "specs_found": len(api_result.specs),
+                "graphql_endpoints": len(api_result.graphql_endpoints),
+                "findings": len(api_result.findings),
+                "sample_specs": [s.url for s in api_result.specs[:20]],
+                "sample_graphql": api_result.graphql_endpoints[:20],
+            }
+
         crawl_result = self.crawler.crawl(self.target_url)
         for seed in self.seed_urls:
             if seed not in crawl_result.urls:
                 crawl_result.urls.append(seed)
+
+        # Passive technology fingerprint: identify the stack from headers,
+        # cookies, and body markers so detectors can tailor payloads and known
+        # vulnerable components are flagged. Runs after crawl so per-page
+        # observations and discovered JS assets contribute to detection.
+        fingerprint_findings: List[Finding] = []
+        technologies: List[str] = []
+        fingerprint_stats: Dict[str, object] = {"enabled": self.fingerprinter is not None}
+        if self.fingerprinter is not None:
+            fp_result = self.fingerprinter.fingerprint(self.target_url, crawl_result)
+            fingerprint_findings = fp_result.findings
+            technologies = fp_result.names()
+            fingerprint_stats = {
+                "enabled": True,
+                "technologies": [
+                    {"name": t.name, "category": t.category, "version": t.version}
+                    for t in fp_result.technologies
+                ],
+                "count": len(fp_result.technologies),
+            }
+
         context = ScanContext(
             target_url=self.target_url,
             crawl=crawl_result,
@@ -255,10 +323,17 @@ class Scanner:
             sqli_baseline_samples=self.sqli_baseline_samples,
             sqli_test_samples=self.sqli_test_samples,
             sqli_probe_log_limit=self.sqli_probe_log_limit,
+            ssti_max_payloads=self.ssti_max_payloads,
+            cmdi_max_payloads=self.cmdi_max_payloads,
+            cmdi_time_threshold=self.cmdi_time_threshold,
+            cmdi_baseline_samples=self.cmdi_baseline_samples,
+            cmdi_test_samples=self.cmdi_test_samples,
+            xxe_max_payloads=self.xxe_max_payloads,
             seed_urls=self.seed_urls,
             oast=self.oast_client,
             secondary_engine=self.secondary_engine,
             renderer=self.renderer,
+            technologies=technologies,
             metadata={
                 "urls_discovered": str(len(crawl_result.urls)),
                 "forms_discovered": str(len(crawl_result.forms)),
@@ -278,6 +353,8 @@ class Scanner:
         )
 
         findings: List[Finding] = list(discovery_findings)
+        findings.extend(api_findings)
+        findings.extend(fingerprint_findings)
         detector_stats: List[Dict[str, object]] = []
         for detector in self.registry.create_all():
             started = time.monotonic()
@@ -371,6 +448,8 @@ class Scanner:
                 "sensitive_findings": len(discovery_findings),
                 "sample_paths": discovered_paths[:20],
             },
+            "api_discovery": api_stats,
+            "fingerprint": fingerprint_stats,
             "sqli_probes": context.metadata.get("sqli_probe_artifacts", []),
             "oast_interactions": oast_interactions,
             "nuclei": nuclei_stats,
@@ -467,17 +546,18 @@ class Scanner:
                     "remote_address": interaction.remote_address,
                 }
             )
+            profile = self._oast_finding_profile(interaction.correlation_id)
             findings.append(
                 Finding(
-                    vulnerability="Blind SSRF Confirmed via OAST",
+                    vulnerability=profile["vulnerability"],
                     severity="high",
-                    cwe="CWE-918",
-                    owasp="A10:2021 SSRF",
+                    cwe=profile["cwe"],
+                    owasp=profile["owasp"],
                     url=self.target_url,
                     parameter=None,
                     description=(
-                        "An out-of-band interaction was received on the collaborator, confirming "
-                        "server-side request egress triggered by an injected callback payload."
+                        f"An out-of-band interaction was received on the collaborator, confirming "
+                        f"{profile['confirmation']} triggered by an injected callback payload."
                     ),
                     evidence=(
                         f"protocol={interaction.protocol}; source={interaction.remote_address}; "
@@ -485,7 +565,52 @@ class Scanner:
                     ),
                     detector="oast",
                     confidence="high",
-                    references=["https://portswigger.net/web-security/ssrf/blind"],
+                    references=[profile["reference"]],
                 )
             )
         return recorded
+
+    @staticmethod
+    def _oast_finding_profile(correlation_id: str) -> Dict[str, str]:
+        """Map an OAST correlation id (``<class>|...``) to finding metadata."""
+        cls = (correlation_id or "").split("|", 1)[0].strip().lower()
+        profiles = {
+            "ssrf": {
+                "vulnerability": "Blind SSRF Confirmed via OAST",
+                "cwe": "CWE-918",
+                "owasp": "A10:2021 SSRF",
+                "confirmation": "server-side request egress",
+                "reference": "https://portswigger.net/web-security/ssrf/blind",
+            },
+            "cmdi": {
+                "vulnerability": "Blind OS Command Injection Confirmed via OAST",
+                "cwe": "CWE-78",
+                "owasp": "A03:2021 Injection",
+                "confirmation": "server-side command execution",
+                "reference": "https://portswigger.net/web-security/os-command-injection/blind",
+            },
+            "xxe": {
+                "vulnerability": "Blind XXE Confirmed via OAST",
+                "cwe": "CWE-611",
+                "owasp": "A05:2021 Security Misconfiguration",
+                "confirmation": "external-entity resolution",
+                "reference": "https://portswigger.net/web-security/xxe/blind",
+            },
+            "ssti": {
+                "vulnerability": "Blind Server-Side Template Injection Confirmed via OAST",
+                "cwe": "CWE-1336",
+                "owasp": "A03:2021 Injection",
+                "confirmation": "server-side template evaluation",
+                "reference": "https://portswigger.net/research/server-side-template-injection",
+            },
+        }
+        return profiles.get(
+            cls,
+            {
+                "vulnerability": "Blind Injection Confirmed via OAST",
+                "cwe": "CWE-77",
+                "owasp": "A03:2021 Injection",
+                "confirmation": "an out-of-band server interaction",
+                "reference": "https://portswigger.net/web-security/ssrf/blind",
+            },
+        )

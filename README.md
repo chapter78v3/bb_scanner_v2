@@ -31,6 +31,9 @@ The scanner is designed around separation of concerns:
   - Local File Inclusion (LFI) / arbitrary file read checks
   - IDOR heuristic testing
   - Secrets in JavaScript
+  - Server-Side Template Injection (SSTI) via arithmetic evaluation
+  - OS Command Injection (time-based differential + out-of-band)
+  - XML External Entity (XXE) injection (in-band file read + out-of-band)
 - New checks can be added as plugins without changing scanner core.
 
 5. `registry.py`
@@ -39,7 +42,17 @@ The scanner is designed around separation of concerns:
 6. `reporting.py`
 - Console summary, JSON report generation, and HTML report generation in `Reports/`.
 
-7. `main.py`
+7. `api_discovery.py`
+- Probes conventional locations for OpenAPI/Swagger specs, GraphQL endpoints, and SOAP/WSDL definitions.
+- Validates each hit by parsing it (not just status codes), follows Swagger-UI/Redoc pages to their spec URL, and classifies GraphQL introspection exposure.
+- Confirmed URLs are seeded so the crawler and every detector test them too.
+
+8. `fingerprint.py`
+- Passively identifies the technology stack (web server, language, framework, CMS, JS libraries, WAF/CDN) from headers, cookies, and body markers.
+- Reports a technology inventory and flags components whose detected version matches a known-vulnerable range.
+- Detected technologies are exposed on the scan context and tailor detector payloads (e.g. LFI adds php://filter source-disclosure wrappers when PHP is detected; command injection tries Windows payloads first on Windows stacks).
+
+9. `main.py`
 - CLI entrypoint that orchestrates discovery, detector execution, and reporting.
 
 ## Install
@@ -73,6 +86,15 @@ Optional args:
 - `--sqli-baseline-samples`: baseline timing sample count
 - `--sqli-test-samples`: probe timing sample count
 - `--sqli-probe-log-limit`: max SQLi probe artifacts kept in report coverage
+- `--ssti-max-payloads`: cap SSTI expression templates per parameter (`0` means all)
+- `--cmdi-max-payloads`: cap command-injection sleep templates per parameter (`0` means all)
+- `--cmdi-time-threshold`: minimum sleep-vs-control timing delta in seconds to flag command injection
+- `--cmdi-baseline-samples`: baseline timing sample count for command injection
+- `--cmdi-test-samples`: probe timing sample count per command-injection payload
+- `--xxe-max-payloads`: cap in-band XXE templates per endpoint (`0` means all)
+- `--no-api-discovery`: disable well-known API definition discovery (enabled by default)
+- `--api-discovery-max-paths`: cap well-known API paths probed per category (`0` means all)
+- `--no-fingerprint`: disable passive technology fingerprinting (enabled by default)
 
 ## Exit Codes
 
@@ -90,5 +112,10 @@ Optional args:
 
 - IDOR detection is heuristic and stronger when authenticated context is provided.
 - Blind SSRF confirmation may require out-of-band infrastructure.
-- LFI detection is heuristic and endpoint-agnostic (query and form parameters with file/path semantics).
+- LFI detection is heuristic and endpoint-agnostic (query and form parameters with file/path semantics). When PHP is fingerprinted it also tries php://filter wrappers and decodes base64 output to confirm source/file disclosure.
+- SSTI detection is arithmetic and engine-agnostic (renders an injected product between random sentinels), yielding high-confidence, low-false-positive results.
+- OS command injection uses a time-based differential (sleep vs. matching no-sleep payload) so uniformly slow endpoints do not false-positive; configure an OAST server to also confirm blind execution.
+- XXE probes XML-accepting endpoints for in-band file disclosure and (with `--oast-server`) blind external-entity callbacks.
+- API definition discovery validates OpenAPI/Swagger specs and GraphQL/WSDL endpoints by parsing them, so hits are confirmed rather than guessed; discovered URLs feed the crawler and all detectors.
+- Technology fingerprinting is passive (header/cookie/body signatures); version-based CVE advisories are inferred and flagged at medium/low confidence — confirm the deployed version before relying on them.
 - Use known vulnerable labs (e.g., local intentionally vulnerable apps) for validation.

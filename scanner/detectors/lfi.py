@@ -7,8 +7,10 @@ from ..models import Finding, ScanContext
 from ..payloads import (
     LFI_FILE_SCHEME_PAYLOADS,
     LFI_PARAM_HINTS,
+    LFI_PHP_WRAPPER_PAYLOADS,
     LFI_TRAVERSAL_PAYLOADS,
     match_lfi,
+    match_lfi_encoded,
 )
 from ..registry import DetectorPlugin
 from ..request_engine import RequestEngine
@@ -62,26 +64,10 @@ class LFIDetector(DetectorPlugin):
                 if response is None:
                     continue
 
-                sig = match_lfi(response.text)
-                if sig and sig.lower() not in baseline_body_l:
-                    findings.append(
-                        Finding(
-                            vulnerability="Potential Local File Inclusion / Arbitrary File Read",
-                            severity="high",
-                            cwe="CWE-98",
-                            owasp="A05:2021 Security Misconfiguration",
-                            url=test_url,
-                            parameter=param,
-                            description=(
-                                "A leaked system-file signature appeared after a file/path payload "
-                                "and was absent from the baseline response."
-                            ),
-                            evidence=f"signature={sig!r}; {self._extract_evidence(response.text)}",
-                            detector=self.name,
-                            confidence="medium",
-                            references=["Validate manually to confirm file-read primitive and scope of access."],
-                        )
-                    )
+                detection = self._detect_lfi(payload, response.text, baseline_body_l)
+                if detection is not None:
+                    sig, via = detection
+                    findings.append(self._make_finding(test_url, param, via, sig, response.text))
                     break
 
         return findings
@@ -106,26 +92,10 @@ class LFIDetector(DetectorPlugin):
                 if response is None:
                     continue
 
-                sig = match_lfi(response.text)
-                if sig and sig.lower() not in baseline_body_l:
-                    findings.append(
-                        Finding(
-                            vulnerability="Potential Local File Inclusion / Arbitrary File Read",
-                            severity="high",
-                            cwe="CWE-98",
-                            owasp="A05:2021 Security Misconfiguration",
-                            url=action_url,
-                            parameter=field.name,
-                            description=(
-                                "A leaked system-file signature appeared after a form file/path payload "
-                                "and was absent from the baseline response."
-                            ),
-                            evidence=f"signature={sig!r}; {self._extract_evidence(response.text)}",
-                            detector=self.name,
-                            confidence="medium",
-                            references=["Validate manually to confirm file-read primitive and scope of access."],
-                        )
-                    )
+                detection = self._detect_lfi(payload, response.text, baseline_body_l)
+                if detection is not None:
+                    sig, via = detection
+                    findings.append(self._make_finding(action_url, field.name, via, sig, response.text))
                     break
 
         return findings
@@ -135,10 +105,60 @@ class LFIDetector(DetectorPlugin):
         return LFI_FILE_SCHEME_PAYLOADS + LFI_TRAVERSAL_PAYLOADS
 
     def _build_payloads(self, context: ScanContext) -> List[str]:
-        payloads = self._all_payloads()
+        payloads = list(self._all_payloads())
+        # Fingerprint-driven tailoring: when PHP is detected, prioritise
+        # php://filter wrappers that disclose file/source contents as base64.
+        if self._php_detected(context):
+            payloads = list(LFI_PHP_WRAPPER_PAYLOADS) + payloads
         if context.lfi_max_payloads > 0:
             return payloads[: context.lfi_max_payloads]
         return payloads
+
+    @staticmethod
+    def _php_detected(context: ScanContext) -> bool:
+        return any(str(t).lower() == "php" for t in getattr(context, "technologies", []) or [])
+
+    def _detect_lfi(self, payload: str, response_text: str, baseline_body_l: str):
+        """Return (signature, via) if a leaked-file signal is present, else None."""
+        sig = match_lfi(response_text)
+        if sig and sig.lower() not in baseline_body_l:
+            return sig, "direct"
+        # php://filter payloads return base64-encoded file/source contents.
+        if payload.startswith("php://"):
+            enc = match_lfi_encoded(response_text)
+            if enc and enc.lower() not in baseline_body_l:
+                return enc, "php://filter base64"
+        return None
+
+    def _make_finding(self, url: str, param: str, via: str, sig: str, response_text: str) -> Finding:
+        if via == "direct":
+            vulnerability = "Potential Local File Inclusion / Arbitrary File Read"
+            description = (
+                "A leaked system-file signature appeared after a file/path payload "
+                "and was absent from the baseline response."
+            )
+            confidence = "medium"
+        else:
+            vulnerability = "Local File Inclusion via php://filter (Source/File Disclosure)"
+            description = (
+                "A php://filter payload returned base64 content that decodes to a leaked "
+                "system file, confirming PHP stream-wrapper file/source disclosure. The "
+                "decoded signature was absent from the baseline response."
+            )
+            confidence = "high"
+        return Finding(
+            vulnerability=vulnerability,
+            severity="high",
+            cwe="CWE-98",
+            owasp="A05:2021 Security Misconfiguration",
+            url=url,
+            parameter=param,
+            description=description,
+            evidence=f"via={via}; signature={sig!r}; {self._extract_evidence(response_text)}",
+            detector=self.name,
+            confidence=confidence,
+            references=["Validate manually to confirm file-read primitive and scope of access."],
+        )
 
     @staticmethod
     def _looks_like_lfi_param(param_name: str) -> bool:
