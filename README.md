@@ -24,7 +24,7 @@ The scanner is designed around separation of concerns:
 
 4. `detectors/*`
 - One detector per vulnerability class:
-  - SQL Injection (error and time-based)
+  - SQL Injection (error, time-based, and boolean-based blind)
   - Reflected XSS
   - CSRF token checks
   - SSRF parameter probing
@@ -111,6 +111,7 @@ Optional args:
 ## Notes
 
 - IDOR detection is heuristic and stronger when authenticated context is provided.
+- Boolean-based blind SQLi compares TRUE/FALSE payload responses (a TRUE condition matches the baseline while a FALSE one diverges) and re-confirms with a second constant pair; it catches oracle-style injection (e.g. status SUCCESS/FAIL) that error/time-based checks miss, including on engines without a usable time delay (Presto/Trino).
 - Blind SSRF confirmation may require out-of-band infrastructure.
 - LFI detection is heuristic and endpoint-agnostic (query and form parameters with file/path semantics). When PHP is fingerprinted it also tries php://filter wrappers and decodes base64 output to confirm source/file disclosure.
 - SSTI detection is arithmetic and engine-agnostic (renders an injected product between random sentinels), yielding high-confidence, low-false-positive results.
