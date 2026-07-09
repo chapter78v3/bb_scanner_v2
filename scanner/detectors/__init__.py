@@ -1,5 +1,6 @@
 """Detector package and default plugin registration."""
 
+from .aem import AEMDispatcherDetector
 from .cors import CORSMisconfigurationDetector
 from .csrf import CSRFFDetector
 from .cmdi import CommandInjectionDetector
@@ -32,4 +33,5 @@ DEFAULT_DETECTORS = [
     SSTIDetector,
     CommandInjectionDetector,
     XXEDetector,
+    AEMDispatcherDetector,
 ]

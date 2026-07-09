@@ -5,6 +5,7 @@ report*.json
 report*.sarif
 sample_report.json
 *.sarif
+*.log
 
 # --- Historical bug bounty reports (SENSITIVE - keep local only) ---
 bb_reports/

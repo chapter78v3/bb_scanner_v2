@@ -34,6 +34,7 @@ The scanner is designed around separation of concerns:
   - Server-Side Template Injection (SSTI) via arithmetic evaluation
   - OS Command Injection (time-based differential + out-of-band)
   - XML External Entity (XXE) injection (in-band file read + out-of-band)
+  - AEM dispatcher bypass / unauthenticated JCR content disclosure (Adobe Experience Manager)
 - New checks can be added as plugins without changing scanner core.
 
 5. `registry.py`
@@ -92,6 +93,8 @@ Optional args:
 - `--cmdi-baseline-samples`: baseline timing sample count for command injection
 - `--cmdi-test-samples`: probe timing sample count per command-injection payload
 - `--xxe-max-payloads`: cap in-band XXE templates per endpoint (`0` means all)
+- `--aem-content-path`: repeatable AEM JCR node path to probe for dispatcher-bypass disclosure (e.g. `/content/mysite/en`); a trailing `.json`/selector is stripped automatically
+- `--aem-max-paths`: cap the number of AEM content nodes probed (`0` uses the built-in default)
 - `--no-api-discovery`: disable well-known API definition discovery (enabled by default)
 - `--api-discovery-max-paths`: cap well-known API paths probed per category (`0` means all)
 - `--no-fingerprint`: disable passive technology fingerprinting (enabled by default)
@@ -117,6 +120,7 @@ Optional args:
 - SSTI detection is arithmetic and engine-agnostic (renders an injected product between random sentinels), yielding high-confidence, low-false-positive results.
 - OS command injection uses a time-based differential (sleep vs. matching no-sleep payload) so uniformly slow endpoints do not false-positive; configure an OAST server to also confirm blind execution.
 - XXE probes XML-accepting endpoints for in-band file disclosure and (with `--oast-server`) blind external-entity callbacks.
+- AEM dispatcher-bypass detection engages only when the target looks like Adobe Experience Manager (fingerprint markers, `/content/` or `/etc.clientlibs/` references, or an operator-supplied `--aem-content-path`). It confirms a leak when a mutated request returns a raw JCR node (`jcr:primaryType`) that the canonical `.json` request does not — proving a dispatcher filter bypass. Probed vectors include the literal double-slash prefix (`//content/...`), benign-extension appends (`.json.css`/`.json.html`/`.json.png`), alternative selectors (`.1.json`/`.infinity.json`/`.tidy.json`/`.children.json`), and the QueryBuilder servlet. Because `requests`/`urllib3` silently collapse a leading `//` on the wire, the double-slash vector is sent via `RequestEngine.get_raw_path`, which preserves the exact request target like `curl "https://host//content..."`.
 - API definition discovery validates OpenAPI/Swagger specs and GraphQL/WSDL endpoints by parsing them, so hits are confirmed rather than guessed; discovered URLs feed the crawler and all detectors.
 - Technology fingerprinting is passive (header/cookie/body signatures); version-based CVE advisories are inferred and flagged at medium/low confidence — confirm the deployed version before relying on them.
 - Use known vulnerable labs (e.g., local intentionally vulnerable apps) for validation.
