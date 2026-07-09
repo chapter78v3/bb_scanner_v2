@@ -49,6 +49,8 @@ class Scanner:
         cmdi_baseline_samples: int = 2,
         cmdi_test_samples: int = 2,
         xxe_max_payloads: int = 0,
+        aem_content_paths: List[str] | None = None,
+        aem_max_paths: int = 0,
         verify_tls: bool = True,
         proxy: str | None = None,
         max_retries: int = 2,
@@ -105,6 +107,8 @@ class Scanner:
         self.cmdi_baseline_samples = max(1, cmdi_baseline_samples)
         self.cmdi_test_samples = max(1, cmdi_test_samples)
         self.xxe_max_payloads = max(0, xxe_max_payloads)
+        self.aem_content_paths = [p.strip() for p in (aem_content_paths or []) if p.strip()]
+        self.aem_max_paths = max(0, aem_max_paths)
         self.concurrency = max(1, concurrency)
         self.oast_client = build_oast_client(oast_server, use_interactsh=oast_interactsh)
         self.last_run_stats: Dict[str, object] = {}
@@ -329,6 +333,8 @@ class Scanner:
             cmdi_baseline_samples=self.cmdi_baseline_samples,
             cmdi_test_samples=self.cmdi_test_samples,
             xxe_max_payloads=self.xxe_max_payloads,
+            aem_content_paths=self.aem_content_paths,
+            aem_max_paths=self.aem_max_paths,
             seed_urls=self.seed_urls,
             oast=self.oast_client,
             secondary_engine=self.secondary_engine,

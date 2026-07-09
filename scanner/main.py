@@ -193,6 +193,20 @@ def build_parser() -> argparse.ArgumentParser:
              "the stack and flags known-vulnerable components.",
     )
     parser.add_argument(
+        "--aem-content-path",
+        action="append",
+        default=[],
+        help="Repeatable AEM JCR node path to probe for dispatcher-bypass content disclosure "
+             "(e.g. /content/mysite/en). A trailing .json/selector is stripped automatically.",
+    )
+    parser.add_argument(
+        "--aem-max-paths",
+        type=int,
+        default=0,
+        help="Cap the number of AEM content nodes probed by the dispatcher-bypass detector. "
+             "0 uses the built-in default.",
+    )
+    parser.add_argument(
         "--nuclei",
         action="store_true",
         help="Run ProjectDiscovery nuclei over discovered URLs and merge its findings (requires nuclei on PATH).",
@@ -379,6 +393,8 @@ def main() -> int:
         cmdi_baseline_samples=args.cmdi_baseline_samples,
         cmdi_test_samples=args.cmdi_test_samples,
         xxe_max_payloads=args.xxe_max_payloads,
+        aem_content_paths=args.aem_content_path,
+        aem_max_paths=args.aem_max_paths,
         verify_tls=not args.insecure,
         proxy=args.proxy,
         max_retries=args.max_retries,

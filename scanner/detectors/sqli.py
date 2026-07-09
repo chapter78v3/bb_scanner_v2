@@ -1,18 +1,34 @@
 from __future__ import annotations
 
+import difflib
 import statistics
 import time
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from ..models import Finding, ScanContext
-from ..payloads import SQLI_ERROR_PAYLOADS, SQLI_PARAM_HINTS, SQLI_TIME_DIFF_PAIRS, SQLI_TIME_PAYLOADS, match_sql_error
+from ..payloads import (
+    SQLI_BOOLEAN_PAIRS,
+    SQLI_ERROR_PAYLOADS,
+    SQLI_PARAM_HINTS,
+    SQLI_TIME_DIFF_PAIRS,
+    SQLI_TIME_PAYLOADS,
+    match_sql_error,
+)
 from ..registry import DetectorPlugin
 from ..request_engine import RequestEngine
 
+# Boolean-based blind thresholds. A TRUE payload must render essentially the
+# same page as the baseline, while a FALSE payload must diverge — and the
+# divergence is re-confirmed with a second constant pair before reporting.
+_BOOL_TRUE_SIM = 0.95
+_BOOL_FALSE_SIM_MAX = 0.92
+_BOOL_MIN_GAP = 0.05
+_BOOL_SIM_MAXLEN = 12000
+
 
 class SQLiDetector(DetectorPlugin):
-    """Detects potential SQL injection via error-based and time-based checks."""
+    """Detects SQL injection via error-based, time-based, and boolean-blind checks."""
 
     name = "sqli"
 
@@ -22,9 +38,11 @@ class SQLiDetector(DetectorPlugin):
 
         for url in context.crawl.urls:
             findings.extend(self._test_url_query_params(url, engine, context, probes))
+            findings.extend(self._boolean_probe_url(url, engine, context, probes))
 
         for form in context.crawl.forms:
             findings.extend(self._test_form(form.action_url, form.method, form.fields, engine, context, probes))
+            findings.extend(self._boolean_probe_form(form.action_url, form.method, form.fields, engine, context, probes))
 
         return findings
 
@@ -537,6 +555,151 @@ class SQLiDetector(DetectorPlugin):
             if method.upper() == "POST":
                 return engine.post(action_url, data=data)
             return engine.get(action_url, params=data)
+        except Exception:
+            return None
+
+    # -- Boolean-based blind ------------------------------------------------
+
+    def _boolean_probe_url(self, url: str, engine: RequestEngine, context: ScanContext, probes: List[Dict[str, object]]) -> List[Finding]:
+        findings: List[Finding] = []
+        parsed = urlparse(url)
+        params = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        candidates = self._build_param_candidates(params, context)
+        if not candidates:
+            return findings
+        for param in candidates:
+            base_value = params.get(param, "1")
+
+            def requester(value, p=param):
+                mutated = dict(params)
+                mutated[p] = value
+                return self._safe_response(engine, self._with_params(url, mutated))
+
+            finding = self._boolean_core(requester, base_value, context, probes, url, param, "url")
+            if finding is not None:
+                findings.append(finding)
+        return findings
+
+    def _boolean_probe_form(self, action_url: str, method: str, fields, engine: RequestEngine, context: ScanContext, probes: List[Dict[str, object]]) -> List[Finding]:
+        findings: List[Finding] = []
+        if not fields:
+            return findings
+        method = (method or "GET").upper()
+        base = {field.name: (field.value or "1") for field in fields}
+        for field in fields:
+            base_value = base.get(field.name, "1")
+
+            def requester(value, name=field.name):
+                data = dict(base)
+                data[name] = value
+                return self._submit(engine, action_url, method, data)
+
+            finding = self._boolean_core(requester, base_value, context, probes, action_url, field.name, "form")
+            if finding is not None:
+                findings.append(finding)
+        return findings
+
+    def _boolean_core(self, requester, base_value: str, context: ScanContext, probes, report_url: str, param: str, target: str) -> Optional[Finding]:
+        baseline = requester(base_value)
+        if baseline is None:
+            return None
+        base_text = baseline.text
+        base_status = baseline.status_code
+
+        for family in self._boolean_pairs(context):
+            true_resp = requester(base_value + family["true"])
+            false_resp = requester(base_value + family["false"])
+            if true_resp is None or false_resp is None:
+                continue
+            signal, sbt, sbf = self._bool_signal(
+                base_text, true_resp.text, false_resp.text,
+                base_status, true_resp.status_code, false_resp.status_code,
+            )
+            self._record_probe(context, probes, {
+                "target": target, "mode": "boolean", "url": report_url, "parameter": param,
+                "family": family["name"], "sim_true": round(sbt, 3), "sim_false": round(sbf, 3),
+                "signal": "candidate" if signal else "negative",
+            })
+            if not signal:
+                continue
+
+            # Re-confirm with a different constant pair to eliminate coincidental
+            # content differences before reporting.
+            vtrue = requester(base_value + family["verify_true"])
+            vfalse = requester(base_value + family["verify_false"])
+            if vtrue is None or vfalse is None:
+                continue
+            signal2, vbt, vbf = self._bool_signal(
+                base_text, vtrue.text, vfalse.text,
+                base_status, vtrue.status_code, vfalse.status_code,
+            )
+            self._record_probe(context, probes, {
+                "target": target, "mode": "boolean_verify", "url": report_url, "parameter": param,
+                "family": family["name"], "sim_true": round(vbt, 3), "sim_false": round(vbf, 3),
+                "signal": "positive" if signal2 else "negative",
+            })
+            if signal2:
+                return Finding(
+                    vulnerability="SQL Injection (Boolean-based Blind)",
+                    severity="high",
+                    cwe="CWE-89",
+                    owasp="A03:2021 Injection",
+                    url=report_url,
+                    parameter=param,
+                    description=(
+                        "TRUE and FALSE boolean payloads appended to this parameter produced "
+                        "consistently different responses — the TRUE payload matched the baseline "
+                        "while the FALSE payload diverged — and the behaviour was re-confirmed with a "
+                        "second constant pair. This indicates the value is evaluated inside a SQL "
+                        "statement (blind SQL injection)."
+                    ),
+                    evidence=(
+                        f"family={family['name']}; sim(base,true)={sbt:.2f}, sim(base,false)={sbf:.2f}; "
+                        f"verify sim(base,true)={vbt:.2f}, sim(base,false)={vbf:.2f}"
+                    ),
+                    detector=self.name,
+                    confidence="high",
+                )
+        return None
+
+    @staticmethod
+    def _bool_signal(base_text, true_text, false_text, base_status, true_status, false_status) -> Tuple[bool, float, float]:
+        sim_bt = SQLiDetector._similarity(base_text, true_text)
+        sim_bf = SQLiDetector._similarity(base_text, false_text)
+        content_signal = (
+            sim_bt >= _BOOL_TRUE_SIM
+            and sim_bf <= _BOOL_FALSE_SIM_MAX
+            and (sim_bt - sim_bf) >= _BOOL_MIN_GAP
+        )
+        # Status divergence: TRUE keeps the baseline status while FALSE changes it
+        # (e.g. 200 SUCCESS vs a 500 on a subquery cardinality error).
+        status_signal = (
+            true_status == base_status
+            and false_status != base_status
+            and false_status != 0
+            and sim_bt >= _BOOL_TRUE_SIM
+        )
+        return (content_signal or status_signal), sim_bt, sim_bf
+
+    @staticmethod
+    def _similarity(a: str, b: str) -> float:
+        a = (a or "")[:_BOOL_SIM_MAXLEN]
+        b = (b or "")[:_BOOL_SIM_MAXLEN]
+        if not a and not b:
+            return 1.0
+        return difflib.SequenceMatcher(None, a, b).ratio()
+
+    @staticmethod
+    def _boolean_pairs(context: ScanContext) -> List[Dict[str, str]]:
+        pairs = SQLI_BOOLEAN_PAIRS
+        if context.sqli_max_payloads > 0:
+            return pairs[: max(1, context.sqli_max_payloads)]
+        return pairs
+
+    @staticmethod
+    def _safe_response(engine: RequestEngine, url: str):
+        try:
+            return engine.get(url)
         except Exception:
             return None
 

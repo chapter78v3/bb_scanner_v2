@@ -65,6 +65,10 @@ _HEADER_SIGNATURES: Tuple[Tuple[str, re.Pattern, str, str, int], ...] = (
     ("x-generator", re.compile(r"drupal\s*([\d.]+)?", re.I), "Drupal", "cms", 1),
     ("x-shopify-stage", re.compile(r".+", re.I), "Shopify", "cms", 0),
     ("x-sucuri-id", re.compile(r".+", re.I), "Sucuri WAF", "cdn-waf", 0),
+    ("x-dispatcher", re.compile(r".+", re.I), "Adobe Experience Manager", "cms", 0),
+    ("x-adobe-content", re.compile(r".+", re.I), "Adobe Experience Manager", "cms", 0),
+    ("server", re.compile(r"communique(?:-([\d.]+))?", re.I), "Adobe Experience Manager", "cms", 1),
+    ("server", re.compile(r"day-servlet-engine", re.I), "Adobe Experience Manager", "cms", 0),
 )
 
 # (cookie_name_regex, tech_name, category)
@@ -81,6 +85,9 @@ _COOKIE_SIGNATURES: Tuple[Tuple[re.Pattern, str, str], ...] = (
     (re.compile(r"^connect\.sid$", re.I), "Express (Node.js)", "framework"),
     (re.compile(r"^django", re.I), "Django", "framework"),
     (re.compile(r"^csrftoken$", re.I), "Django", "framework"),
+    (re.compile(r"^cq-authoring-mode$", re.I), "Adobe Experience Manager", "cms"),
+    (re.compile(r"^wcmmode$", re.I), "Adobe Experience Manager", "cms"),
+    (re.compile(r"^login-token$", re.I), "Adobe Experience Manager", "cms"),
 )
 
 # (compiled_regex_over_body, tech_name, category, version_group_index)
@@ -99,6 +106,10 @@ _BODY_SIGNATURES: Tuple[Tuple[re.Pattern, str, str, int], ...] = (
     (re.compile(r'name=["\']csrf-param["\'][^>]+content=["\']authenticity_token', re.I), "Ruby on Rails", "framework", 0),
     (re.compile(r"Laravel", ), "Laravel", "framework", 0),
     (re.compile(r"jQuery\s+v?([\d.]+)", re.I), "jQuery", "js-library", 1),
+    (re.compile(r"/etc\.clientlibs/", re.I), "Adobe Experience Manager", "cms", 0),
+    (re.compile(r"/etc/designs/", re.I), "Adobe Experience Manager", "cms", 0),
+    (re.compile(r"/content/dam/", re.I), "Adobe Experience Manager", "cms", 0),
+    (re.compile(r"data-sly-|cq:template|granite\.csrf", re.I), "Adobe Experience Manager", "cms", 0),
 )
 
 # Script-source / asset URL patterns (from <script src> and discovered JS files).

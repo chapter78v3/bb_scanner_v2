@@ -88,6 +88,9 @@ class ScanContext:
     cmdi_baseline_samples: int = 2
     cmdi_test_samples: int = 2
     xxe_max_payloads: int = 0
+    # AEM dispatcher-bypass detector controls.
+    aem_content_paths: List[str] = field(default_factory=list)
+    aem_max_paths: int = 0
     seed_urls: List[str] = field(default_factory=list)
     oast: Any = None
     secondary_engine: Any = None
